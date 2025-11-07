@@ -59,6 +59,13 @@
   let overlayElement = null;
   let hoverTimeout = null;
 
+  // 페이지 로드 시 녹화 상태 복원
+  chrome.storage.local.get(['recording'], (result) => {
+    if (result.recording) {
+      isRecording = true;
+    }
+  });
+
   // 오버레이 생성
   function createOverlay(rect, selectors) {
     // 기존 오버레이 제거
@@ -125,10 +132,13 @@
 
   // 요소 하이라이트
   function highlightElement(element) {
-    if (!element || element === currentHighlightedElement) return;
+    if (!element) return;
+    
+    // 같은 요소인 경우에도 오버레이 위치 업데이트
+    const isSameElement = element === currentHighlightedElement;
     
     // 이전 하이라이트 제거
-    if (currentHighlightedElement) {
+    if (currentHighlightedElement && !isSameElement) {
       currentHighlightedElement.style.outline = '';
       currentHighlightedElement.style.outlineOffset = '';
     }
@@ -142,19 +152,21 @@
     const selectors = getSelectorCandidates(element);
     const rect = element.getBoundingClientRect();
     
-    // 오버레이 표시
+    // 오버레이 표시 (항상 업데이트)
     createOverlay(rect, selectors);
 
-    // DevTools에 정보 전송
-    chrome.runtime.sendMessage({
-      type: 'ELEMENT_HOVERED',
-      selectors: selectors,
-      element: {
-        tag: element.tagName,
-        id: element.id || null,
-        classes: Array.from(element.classList || [])
-      }
-    });
+    // DevTools에 정보 전송 (같은 요소가 아닐 때만)
+    if (!isSameElement) {
+      chrome.runtime.sendMessage({
+        type: 'ELEMENT_HOVERED',
+        selectors: selectors,
+        element: {
+          tag: element.tagName,
+          id: element.id || null,
+          classes: Array.from(element.classList || [])
+        }
+      });
+    }
   }
 
   // 하이라이트 제거
@@ -174,6 +186,12 @@
   document.addEventListener('mouseover', function(e) {
     if (!isRecording) return;
     
+    // 마우스 아웃 타이머 취소 (다음 요소로 이동하는 경우)
+    if (mouseoutTimeout) {
+      clearTimeout(mouseoutTimeout);
+      mouseoutTimeout = null;
+    }
+    
     const target = e.target;
     if (!target || target === document.body || target === document.documentElement) {
       removeHighlight();
@@ -185,22 +203,60 @@
       return;
     }
 
-    // 디바운스 적용
-    if (hoverTimeout) {
-      clearTimeout(hoverTimeout);
-    }
+    // 디바운스 적용 (같은 요소가 아닐 때만)
+    if (target !== currentHighlightedElement) {
+      if (hoverTimeout) {
+        clearTimeout(hoverTimeout);
+      }
 
-    hoverTimeout = setTimeout(() => {
-      highlightElement(target);
-    }, 100);
+      hoverTimeout = setTimeout(() => {
+        highlightElement(target);
+      }, 30); // 더 빠른 반응
+    } else {
+      // 같은 요소인 경우 즉시 위치 업데이트 (스크롤 등으로 위치가 변경될 수 있음)
+      const rect = target.getBoundingClientRect();
+      if (overlayElement) {
+        updateOverlayPosition(rect);
+      }
+    }
   }, true);
 
+  // 오버레이 위치만 업데이트 (내용은 변경하지 않음)
+  function updateOverlayPosition(rect) {
+    if (!overlayElement) return;
+    
+    const overlayHeight = overlayElement.offsetHeight;
+    const overlayWidth = overlayElement.offsetWidth;
+    const overlayTop = rect.top - overlayHeight - 10;
+    const overlayBottom = rect.bottom + 10;
+    
+    if (overlayTop >= 0) {
+      overlayElement.style.top = overlayTop + 'px';
+      overlayElement.style.left = rect.left + 'px';
+    } else {
+      overlayElement.style.top = overlayBottom + 'px';
+      overlayElement.style.left = rect.left + 'px';
+    }
+
+    // 화면 밖으로 나가지 않도록 조정
+    const maxLeft = window.innerWidth - overlayWidth - 10;
+    const currentLeft = parseInt(overlayElement.style.left) || 0;
+    if (currentLeft > maxLeft) {
+      overlayElement.style.left = Math.max(10, maxLeft) + 'px';
+    }
+    if (currentLeft < 10) {
+      overlayElement.style.left = '10px';
+    }
+  }
+
   // 마우스 아웃 이벤트
+  let mouseoutTimeout = null;
   document.addEventListener('mouseout', function(e) {
     if (!isRecording) return;
     
     if (hoverTimeout) {
       clearTimeout(hoverTimeout);
+      hoverTimeout = null;
     }
     
     // 마우스가 오버레이로 이동한 경우는 하이라이트 유지
@@ -209,13 +265,50 @@
       return;
     }
     
+    // 다른 요소로 이동하는 경우 (relatedTarget이 있고 body/documentElement가 아닌 경우)
+    if (relatedTarget && relatedTarget !== document.body && relatedTarget !== document.documentElement) {
+      // 다음 요소로 이동하는 것이므로 하이라이트 제거하지 않음
+      // 마우스 오버 이벤트에서 처리됨
+      return;
+    }
+    
+    // 기존 타이머 취소
+    if (mouseoutTimeout) {
+      clearTimeout(mouseoutTimeout);
+    }
+    
+    // body나 documentElement로 이동하는 경우에만 하이라이트 제거
     // 약간의 지연 후 하이라이트 제거 (오버레이로 이동할 시간을 줌)
-    setTimeout(() => {
+    mouseoutTimeout = setTimeout(() => {
       const activeElement = document.elementFromPoint(e.clientX, e.clientY);
-      if (!activeElement || (activeElement.id !== '__ai_test_recorder_overlay__' && !activeElement.closest('#__ai_test_recorder_overlay__'))) {
-        removeHighlight();
+      if (!activeElement || 
+          activeElement === document.body || 
+          activeElement === document.documentElement ||
+          (activeElement.id !== '__ai_test_recorder_overlay__' && !activeElement.closest('#__ai_test_recorder_overlay__'))) {
+        // 다른 요소로 이동하지 않은 경우에만 하이라이트 제거
+        if (activeElement !== currentHighlightedElement && 
+            activeElement !== document.body && 
+            activeElement !== document.documentElement) {
+          removeHighlight();
+        }
       }
-    }, 100);
+      mouseoutTimeout = null;
+    }, 200);
+  }, true);
+
+  // 스크롤 시 오버레이 위치 업데이트
+  let scrollTimeout = null;
+  window.addEventListener('scroll', function() {
+    if (!isRecording || !currentHighlightedElement || !overlayElement) return;
+    
+    if (scrollTimeout) {
+      clearTimeout(scrollTimeout);
+    }
+    
+    scrollTimeout = setTimeout(() => {
+      const rect = currentHighlightedElement.getBoundingClientRect();
+      updateOverlayPosition(rect);
+    }, 50);
   }, true);
 
   function recordInputEvent(e) {
@@ -230,6 +323,13 @@
   document.addEventListener('click', function(e){
     if (!isRecording) return; // 녹화 중이 아니면 무시
     try {
+      const target = e.target;
+      
+      // 클릭된 요소를 하이라이트하고 오버레이 표시
+      if (target && target !== document.body && target !== document.documentElement) {
+        highlightElement(target);
+      }
+      
       const ev = serializeEvent(e);
       persist(ev);
       chrome.runtime.sendMessage({type:'EVENT_RECORDED', event:ev});
@@ -301,16 +401,33 @@
     }
   }
 
+  // 탭 업데이트 감지하여 녹화 상태 복원
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === 'CHECK_RECORDING_STATUS') {
+      chrome.storage.local.get(['recording'], (result) => {
+        if (result.recording && !isRecording) {
+          isRecording = true;
+        }
+        sendResponse({recording: isRecording});
+      });
+      return true;
+    }
+  });
+
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async ()=>{
       // 녹화 상태 업데이트
       if (msg.type === 'RECORDING_START') {
         isRecording = true;
+        // 녹화 상태를 Storage에 저장
+        chrome.storage.local.set({recording: true});
         sendResponse({ok: true});
         return;
       }
       if (msg.type === 'RECORDING_STOP') {
         isRecording = false;
+        // 녹화 상태를 Storage에서 제거
+        chrome.storage.local.remove(['recording']);
         removeHighlight();
         // 모든 대기 중인 타이머 취소
         inputTimers.forEach((timer, target) => {
@@ -396,8 +513,43 @@
           try {
             if (ev.action === 'click') {
               found.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              await new Promise(r=>setTimeout(r, 300));
-              found.click();
+              await new Promise(r=>setTimeout(r, 350));
+              found.focus();
+
+              let clickable = true;
+              let reason = '';
+              const style = window.getComputedStyle(found);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                clickable = false;
+                reason = 'element not visible';
+              } else if (found.disabled) {
+                clickable = false;
+                reason = 'element disabled';
+              } else {
+                try {
+                  found.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+                  found.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                  found.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                  found.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                } catch(e) {
+                  clickable = false;
+                  reason = e.message || 'click event dispatch error';
+                }
+              }
+              if (!clickable) {
+                chrome.runtime.sendMessage({
+                  type: 'REPLAY_STEP_RESULT',
+                  ok: false,
+                  reason: reason || 'unhandled click error',
+                  used: found.tagName,
+                  selector: usedSelector,
+                  step: i + 1,
+                  total: events.length,
+                  ev
+                });
+                found.style.outline = '';
+                continue;
+              }
             } else if (ev.action === 'input') {
               found.scrollIntoView({ behavior: 'smooth', block: 'center' });
               await new Promise(r=>setTimeout(r, 300));

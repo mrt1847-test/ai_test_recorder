@@ -58,7 +58,7 @@ startBtn.addEventListener('click', ()=>{
     recording = true;
     startBtn.disabled = true;
     stopBtn.disabled = false;
-    chrome.storage.local.set({events:[]});
+    chrome.storage.local.set({events:[], recording: true});
     allEvents = [];
     timeline.innerHTML = '';
     selectorList.innerHTML = '';
@@ -70,7 +70,20 @@ startBtn.addEventListener('click', ()=>{
     // 현재 활성 탭에 녹화 시작 메시지 전송
     chrome.tabs.query({active:true, currentWindow:true}, (tabs) => {
       if (tabs[0]) {
-        chrome.tabs.sendMessage(tabs[0].id, {type: 'RECORDING_START'});
+        chrome.tabs.sendMessage(tabs[0].id, {type: 'RECORDING_START'}, (response) => {
+          // 메시지 전송 실패 시 재시도 (페이지가 아직 로드되지 않았을 수 있음)
+          if (chrome.runtime.lastError) {
+            // 탭 업데이트 이벤트 리스너로 페이지 로드 완료 대기
+            const tabId = tabs[0].id;
+            const onUpdated = (updatedTabId, changeInfo, updatedTab) => {
+              if (updatedTabId === tabId && changeInfo.status === 'complete') {
+                chrome.tabs.onUpdated.removeListener(onUpdated);
+                chrome.tabs.sendMessage(tabId, {type: 'RECORDING_START'});
+              }
+            };
+            chrome.tabs.onUpdated.addListener(onUpdated);
+          }
+        });
       }
     });
   }
@@ -81,11 +94,19 @@ stopBtn.addEventListener('click', ()=>{
   startBtn.disabled = false;
   stopBtn.disabled = true;
   
-  // 현재 활성 탭에 녹화 중지 메시지 전송
-  chrome.tabs.query({active:true, currentWindow:true}, (tabs) => {
-    if (tabs[0]) {
-      chrome.tabs.sendMessage(tabs[0].id, {type: 'RECORDING_STOP'});
-    }
+  // 녹화 상태를 Storage에서 제거
+  chrome.storage.local.remove(['recording']);
+  
+  // 모든 탭에 녹화 중지 메시지 전송
+  chrome.tabs.query({}, (tabs) => {
+    tabs.forEach(tab => {
+      chrome.tabs.sendMessage(tab.id, {type: 'RECORDING_STOP'}, (response) => {
+        // 메시지 전송 실패는 무시 (해당 탭에 content script가 없을 수 있음)
+        if (chrome.runtime.lastError) {
+          // 무시
+        }
+      });
+    });
   });
   
   loadTimeline();
