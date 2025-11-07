@@ -5,6 +5,7 @@ const selectorList = document.getElementById('selector-list');
 const iframeBanner = document.getElementById('iframe-banner');
 const codeOutput = document.getElementById('code-output');
 const logEntries = document.getElementById('log-entries');
+const resetBtn = document.getElementById('reset-btn');
 let recording = false;
 let selectedFramework = 'playwright';
 let selectedLanguage = 'python';
@@ -110,6 +111,25 @@ stopBtn.addEventListener('click', ()=>{
   });
   
   loadTimeline();
+});
+
+resetBtn.addEventListener('click', () => {
+  // 전체 삭제
+  chrome.storage.local.clear(() => {
+    recording = false;
+    allEvents = [];
+    timeline.innerHTML = '';
+    selectorList.innerHTML = '';
+    codeOutput.textContent = '';
+    logEntries.innerHTML = '';
+    currentEventIndex = -1;
+    // 모든 탭에 녹화 중지 메시지 전송
+    chrome.tabs.query({}, (tabs) => {
+      tabs.forEach(tab => {
+        chrome.tabs.sendMessage(tab.id, {type: 'RECORDING_STOP'}, () => {});
+      });
+    });
+  });
 });
 
 function loadTimeline() {
