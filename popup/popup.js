@@ -16,7 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
     startBtn.disabled = true;
     stopBtn.disabled = false;
     // Notify user
-    chrome.notifications?.create({ type: 'basic', iconUrl: 'icons/icon48.png', title: 'Recorder', message: 'Recording started' });
+    chrome.notifications?.create({ type: 'basic', title: 'Recorder', message: 'Recording started' });
   });
 
   stopBtn.addEventListener('click', async () => {

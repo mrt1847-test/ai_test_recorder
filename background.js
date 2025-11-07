@@ -1,28 +1,17 @@
-// background.js - handles messages and simple storage proxy
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('AI Test Recorder background installed');
+  console.log('AI Test Recorder installed');
 });
-
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg?.type === 'RECORD_EVENT') {
-    // For MVP we persist events in chrome.storage.local as an array
-    chrome.storage.local.get({ events: [] }, (res) => {
-      const events = res.events || [];
-      events.push(msg.event);
-      chrome.storage.local.set({ events }, () => {
-        // Ack
-        sendResponse({ ok: true, length: events.length });
-      });
-    });
-    // Return true to indicate async sendResponse
+  if (msg && msg.type === 'GET_EVENTS') {
+    chrome.storage.local.get({events:[]}, res => sendResponse({events: res.events || []}));
     return true;
-  } else if (msg?.type === 'GET_EVENTS') {
-    chrome.storage.local.get({ events: [] }, (res) => {
-      sendResponse({ events: res.events || [] });
+  }
+  if (msg && msg.type === 'SAVE_EVENT') {
+    chrome.storage.local.get({events:[]}, res => {
+      const evs = res.events || [];
+      evs.push(msg.event);
+      chrome.storage.local.set({events: evs}, () => sendResponse({ok:true}));
     });
-    return true;
-  } else if (msg?.type === 'CLEAR_EVENTS') {
-    chrome.storage.local.set({ events: [] }, () => sendResponse({ ok: true }));
     return true;
   }
 });

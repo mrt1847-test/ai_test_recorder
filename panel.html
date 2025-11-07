@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="toolbar">
+    <input id="test-url" placeholder="테스트할 URL 입력 (선택)"/>
+    <input id="test-purpose" placeholder="테스트 목적 (선택)"/>
+    <select id="framework-select">
+      <option value="playwright">Playwright</option>
+      <option value="selenium">Selenium</option>
+    </select>
+    <select id="language-select">
+      <option value="python">Python</option>
+      <option value="javascript">JavaScript</option>
+      <option value="typescript">TypeScript</option>
+    </select>
+    <button id="start-record">Record Start</button>
+    <button id="stop-record" disabled>Stop</button>
+    <button id="view-code">코드 보기</button>
+    <button id="replay-btn">Replay</button>
+  </div>
+
+  <div id="main">
+    <div id="left">
+      <h4>Timeline</h4>
+      <div id="timeline"></div>
+    </div>
+    <div id="right">
+      <div id="iframe-banner" class="hidden">⚠️ 이 요소는 iframe 내부에 있습니다. 자동 전환 필요</div>
+      <div id="selector-panel"><h4>추천 셀렉터</h4><div id="selector-list"></div></div>
+      <div id="code-area"><h4>Code Preview</h4><pre><code id="code-output" class="language-python"></code></pre></div>
+      <div id="replay-log"><h4>Replay Log</h4><div id="log-entries"></div></div>
+    </div>
+  </div>
+
+<script src="panel.js"></script>
+</body>
+</html>

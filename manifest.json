@@ -1,25 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "AI Test Recorder (MVP)",
-  "version": "0.1.0",
-  "description": "Record browser interactions, propose selector candidates, and generate Playwright-ready snippets (MVP). No AI key included.",
+  "name": "AI Test Recorder - UI Pro",
+  "version": "1.0",
+  "description": "Improved UI/UX AI Test Recorder (DevTools+Popup)",
   "permissions": [
     "scripting",
-    "activeTab",
     "storage",
-    "tabs"
+    "activeTab"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
-  "action": {
-    "default_popup": "popup/popup.html",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
-  },
+  "devtools_page": "devtools.html",
   "background": {
     "service_worker": "background.js"
   },
@@ -31,7 +23,7 @@
       "js": [
         "content.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ]
 }
