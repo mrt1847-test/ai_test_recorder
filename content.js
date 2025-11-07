@@ -2,23 +2,400 @@
   if (window.__ai_test_recorder_loaded) return;
   window.__ai_test_recorder_loaded = true;
 
+  function escapeAttributeValue(value) {
+    return (value || '').replace(/"/g, '\\"').replace(/\u0008/g, '').replace(/\u000c/g, '').trim();
+  }
+
+  function buildFullXPath(el) {
+    if (!el || el.nodeType !== 1) return null;
+    if (el.id) {
+      const cleanedId = escapeAttributeValue(el.id);
+      if (cleanedId) {
+        return '//*[@id="' + cleanedId + '"]';
+      }
+    }
+    const parts = [];
+    let current = el;
+    while (current && current.nodeType === 1 && current !== document.documentElement) {
+      const tagName = current.tagName.toLowerCase();
+      let index = 1;
+      let sibling = current.previousSibling;
+      while (sibling) {
+        if (sibling.nodeType === 1 && sibling.tagName === current.tagName) {
+          index += 1;
+        }
+        sibling = sibling.previousSibling;
+      }
+      parts.unshift(tagName + '[' + index + ']');
+      current = current.parentNode;
+    }
+    if (parts.length === 0) return null;
+    return '//' + parts.join('/');
+  }
+
+  function cssEscapeIdent(value) {
+    if (typeof value !== 'string') return '';
+    if (window.CSS && typeof window.CSS.escape === 'function') {
+      return window.CSS.escape(value);
+    }
+    return value.replace(/([!"#$%&'()*+,./:;<=>?@\[\]^`{|}~])/g, '\\$1');
+  }
+
+  function buildCssSegment(el) {
+    if (!el || el.nodeType !== 1) return '';
+    const tag = el.tagName.toLowerCase();
+    if (el.id) {
+      return `${tag}#${cssEscapeIdent(el.id)}`;
+    }
+    const classList = Array.from(el.classList || []).slice(0, 2).map(cssEscapeIdent).filter(Boolean);
+    if (classList.length) {
+      return `${tag}.${classList.join('.')}`;
+    }
+    let index = 1;
+    let sibling = el.previousElementSibling;
+    while (sibling) {
+      if (sibling.tagName === el.tagName) {
+        index += 1;
+      }
+      sibling = sibling.previousElementSibling;
+    }
+    return `${tag}:nth-of-type(${index})`;
+  }
+
+  function buildRelativeCssSelector(parent, child) {
+    if (!parent || !child || !parent.contains(child) || parent === child) return null;
+    const segments = [];
+    let current = child;
+    while (current && current !== parent) {
+      if (current.nodeType !== 1) {
+        current = current.parentElement;
+        continue;
+      }
+      const segment = buildCssSegment(current);
+      if (!segment) return null;
+      segments.unshift(segment);
+      current = current.parentElement;
+    }
+    if (current !== parent) return null;
+    return ':scope ' + segments.join(' > ');
+  }
+
+  function buildUniqueCssPath(element, contextElement) {
+    if (!element || element.nodeType !== 1) return null;
+    const segments = [];
+    let current = element;
+    while (current && current.nodeType === 1 && current !== contextElement) {
+      const segment = buildCssSegment(current);
+      if (!segment) return null;
+      segments.unshift(segment);
+      current = current.parentElement;
+      if (!current && contextElement) {
+        return null;
+      }
+    }
+    if (contextElement) {
+      if (segments.length === 0) return null;
+      return ':scope ' + segments.join(' > ');
+    }
+    return segments.join(' > ');
+  }
+
+  function escapeXPathLiteral(value) {
+    if (value.includes('"') && value.includes("'")) {
+      const parts = value.split('"').map(part => '"' + part + '"').join(', "\"", ');
+      return 'concat(' + parts + ')';
+    }
+    if (value.includes('"')) {
+      return "'" + value + "'";
+    }
+    return '"' + value + '"';
+  }
+
+  function buildXPathSegment(el) {
+    if (!el || el.nodeType !== 1) return '';
+    const tag = el.tagName.toLowerCase();
+    if (el.id) {
+      return `${tag}[@id=${escapeXPathLiteral(el.id)}]`;
+    }
+    const nameAttr = el.getAttribute && el.getAttribute('name');
+    if (nameAttr) {
+      return `${tag}[@name=${escapeXPathLiteral(nameAttr)}]`;
+    }
+    let index = 1;
+    let sibling = el.previousElementSibling;
+    while (sibling) {
+      if (sibling.tagName === el.tagName) {
+        index += 1;
+      }
+      sibling = sibling.previousElementSibling;
+    }
+    return `${tag}[${index}]`;
+  }
+
+  function buildRelativeXPathSelector(parent, child) {
+    if (!parent || !child || !parent.contains(child) || parent === child) return null;
+    const segments = [];
+    let current = child;
+    while (current && current !== parent) {
+      if (current.nodeType !== 1) {
+        current = current.parentElement;
+        continue;
+      }
+      const segment = buildXPathSegment(current);
+      if (!segment) return null;
+      segments.unshift(segment);
+      current = current.parentElement;
+    }
+    if (current !== parent) return null;
+    return './/' + segments.join('/');
+  }
+
+  function buildRobustXPathSegment(el) {
+    if (!el || el.nodeType !== 1) return null;
+    const tag = el.tagName.toLowerCase();
+    if (el.id) {
+      return {segment: `//*[@id=${escapeXPathLiteral(el.id)}]`, stop: true};
+    }
+    const attrPriority = ['data-testid','data-test','data-qa','data-cy','data-id','aria-label','role','name','type'];
+    for (const attr of attrPriority) {
+      const val = el.getAttribute && el.getAttribute(attr);
+      if (val) {
+        return {segment: `${tag}[@${attr}=${escapeXPathLiteral(val)}]`, stop: false};
+      }
+    }
+    const classList = Array.from(el.classList || []).filter(Boolean);
+    if (classList.length) {
+      const cls = classList[0];
+      const containsExpr = `contains(concat(' ', normalize-space(@class), ' '), ${escapeXPathLiteral(' ' + cls + ' ')})`;
+      return {segment: `${tag}[${containsExpr}]`, stop: false};
+    }
+    let index = 1;
+    let sibling = el.previousElementSibling;
+    while (sibling) {
+      if (sibling.tagName === el.tagName) {
+        index += 1;
+      }
+      sibling = sibling.previousElementSibling;
+    }
+    return {segment: `${tag}[${index}]`, stop: false};
+  }
+
+  function buildRobustXPath(el) {
+    if (!el || el.nodeType !== 1) return null;
+    const segments = [];
+    let current = el;
+    while (current && current.nodeType === 1) {
+      const info = buildRobustXPathSegment(current);
+      if (!info || !info.segment) return null;
+      segments.unshift(info.segment);
+      if (info.stop) break;
+      current = current.parentElement;
+    }
+    if (segments.length === 0) return null;
+    let xpath = segments[0];
+    if (xpath.startsWith('//*[@')) {
+      if (segments.length > 1) {
+        xpath += '/' + segments.slice(1).join('/');
+      }
+    } else {
+      xpath = '//' + segments.join('/');
+    }
+    return xpath;
+  }
+
+  function parseSelectorForMatching(selector, explicitType) {
+    if (!selector) return {type: explicitType || null, value: ''};
+    let type = explicitType || inferSelectorType(selector);
+    let value = selector;
+    if (selector.startsWith('css=')) {
+      type = 'css';
+      value = selector.slice(4);
+    } else if (selector.startsWith('xpath=')) {
+      type = 'xpath';
+      value = selector.slice(6);
+    } else if (selector.startsWith('text=')) {
+      type = 'text';
+      value = selector.slice(5);
+    }
+    if (type === 'text') {
+      value = value.replace(/^['"]|['"]$/g, '');
+      value = value.replace(/\\"/g, '"').replace(/\\'/g, "'");
+    }
+    return {type, value};
+  }
+
+  function iterateElements(scope, callback) {
+    if (!scope || typeof callback !== 'function') return;
+    if (scope === document) {
+      document.querySelectorAll('*').forEach(callback);
+      return;
+    }
+    if (scope.nodeType === 1) {
+      callback(scope);
+      scope.querySelectorAll('*').forEach(callback);
+    }
+  }
+
+  function countMatchesForSelector(parsed, root) {
+    if (!parsed || !parsed.value) return 0;
+    const scope = root || document;
+    try {
+      if (parsed.type === 'xpath') {
+        const doc = scope.ownerDocument || document;
+        const contextNode = scope.nodeType ? scope : doc;
+        const iterator = doc.evaluate(parsed.value, contextNode, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
+        let count = 0;
+        let node = iterator.iterateNext();
+        while (node) {
+          count += 1;
+          node = iterator.iterateNext();
+        }
+        return count;
+      }
+      if (parsed.type === 'text') {
+        const targetText = normalizeText(parsed.value);
+        if (!targetText) return 0;
+        let count = 0;
+        iterateElements(scope, el => {
+          const txt = normalizeText(el.innerText || el.textContent || '');
+          if (txt && txt.includes(targetText)) {
+            count += 1;
+          }
+        });
+        return count;
+      }
+      // CSS 계열
+      if (scope === document) {
+        return document.querySelectorAll(parsed.value).length;
+      }
+      let count = scope.querySelectorAll(parsed.value).length;
+      if (scope.matches && scope.matches(parsed.value)) {
+        count += 1;
+      }
+      return count;
+    } catch (err) {
+      return 0;
+    }
+  }
+
+  function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
+    if (!baseCandidate || !baseCandidate.selector) return null;
+    const candidate = {...baseCandidate};
+    const parsed = parseSelectorForMatching(candidate.selector, candidate.type);
+    const reasonParts = candidate.reason ? [candidate.reason] : [];
+
+    if (!options.skipGlobalCheck) {
+      const globalCount = countMatchesForSelector(parsed, document);
+      candidate.matchCount = globalCount;
+      candidate.unique = globalCount === 1;
+      if (globalCount === 0 && options.allowZero !== true) {
+        return null;
+      }
+      if (globalCount === 1) {
+        reasonParts.push('유일 일치');
+      } else if (globalCount > 1) {
+        reasonParts.push(`${globalCount}개 요소와 일치`);
+      }
+    }
+
+    if (options.contextElement) {
+      const contextCount = countMatchesForSelector(parsed, options.contextElement);
+      candidate.contextMatchCount = contextCount;
+      candidate.uniqueInContext = contextCount === 1;
+      if (options.contextLabel) {
+        if (contextCount === 1) {
+          reasonParts.push(`${options.contextLabel} 내 유일`);
+        } else if (contextCount > 1) {
+          reasonParts.push(`${options.contextLabel} 내 ${contextCount}개 일치`);
+        } else {
+          reasonParts.push(`${options.contextLabel} 내 일치 없음`);
+        }
+      }
+      if (options.requireContextUnique && !candidate.uniqueInContext) {
+        return null;
+      }
+      if (options.skipGlobalCheck) {
+        candidate.matchCount = contextCount;
+        candidate.unique = candidate.uniqueInContext;
+      }
+    }
+
+    if (!options.skipGlobalCheck && options.requireUnique && candidate.unique === false) {
+      return null;
+    }
+
+    if (!options.skipGlobalCheck && candidate.unique === false && typeof candidate.score === 'number') {
+      candidate.score = Math.min(candidate.score, options.duplicateScore ?? 55);
+    }
+
+    if (options.skipGlobalCheck && candidate.unique === false && typeof candidate.score === 'number') {
+      candidate.score = Math.min(candidate.score, options.duplicateScore ?? 60);
+    }
+
+    if (!candidate.unique && options.element && options.enableIndexing !== false) {
+      const contextEl = options.contextElement && candidate.relation === 'relative' ? options.contextElement : null;
+      const uniqueSelector = buildUniqueCssPath(options.element, contextEl);
+      if (uniqueSelector && uniqueSelector !== candidate.selector) {
+        const uniqueParsed = parseSelectorForMatching(uniqueSelector, 'css');
+        const count = countMatchesForSelector(uniqueParsed, contextEl || document);
+        if (count === 1) {
+          candidate.selector = uniqueSelector;
+          candidate.type = 'css';
+          candidate.matchCount = count;
+          candidate.unique = true;
+          candidate.uniqueInContext = true;
+          candidate.relation = contextEl ? 'relative' : candidate.relation;
+          reasonParts.push('경로 인덱싱 적용');
+        }
+      }
+    }
+
+    candidate.reason = reasonParts.join(' • ');
+    return candidate;
+  }
+
   function getSelectorCandidates(el) {
     if (!el) return [];
     const c = [];
     try {
-      if (el.id) c.push({type:'id', selector:'#'+el.id, score:90, reason:'id exists'});
-      if (el.dataset && el.dataset.testid) c.push({type:'data-testid', selector:'[data-testid="'+el.dataset.testid+'"]', score:85, reason:'data-testid'});
+      if (el.id) {
+        const idCandidate = enrichCandidateWithUniqueness({type:'id', selector:'#'+el.id, score:90, reason:'id 속성'}, {duplicateScore:60, element: el});
+        if (idCandidate) c.push(idCandidate);
+      }
+      if (el.dataset && el.dataset.testid) {
+        const testIdCandidate = enrichCandidateWithUniqueness({type:'data-testid', selector:'[data-testid="'+el.dataset.testid+'"]', score:85, reason:'data-testid 속성'}, {duplicateScore:70, element: el});
+        if (testIdCandidate) c.push(testIdCandidate);
+      }
       const name = el.getAttribute && el.getAttribute('name');
-      if (name) c.push({type:'name', selector:'[name="'+name+'"]', score:80, reason:'name attr'});
+      if (name) {
+        const nameCandidate = enrichCandidateWithUniqueness({type:'name', selector:'[name="'+name+'"]', score:80, reason:'name 속성'}, {duplicateScore:65, element: el});
+        if (nameCandidate) c.push(nameCandidate);
+      }
     } catch(e){}
     if (el.classList && el.classList.length) {
       const cls = Array.from(el.classList).slice(0,3).join('.');
-      c.push({type:'class', selector:'.'+cls, score:60, reason:'class combo'});
+      const classCandidate = enrichCandidateWithUniqueness({type:'class', selector:'.'+cls, score:60, reason:'class 조합'}, {duplicateScore:55, element: el});
+      if (classCandidate) c.push(classCandidate);
     }
-    const txt = (el.innerText||el.textContent||'').trim().split('\n')[0].trim();
-    if (txt) c.push({type:'text', selector:'text="'+txt.slice(0,60)+'"', score:50, reason:'visible text'});
-    c.push({type:'tag', selector:el.tagName.toLowerCase(), score:20, reason:'tag name'});
-    return c;
+    const rawText = (el.innerText||el.textContent||'').trim().split('\n').map(t => t.trim()).filter(Boolean)[0];
+    if (rawText) {
+      const truncatedText = rawText.slice(0, 60);
+      const textCandidate = enrichCandidateWithUniqueness({type:'text', selector:'text="'+escapeAttributeValue(truncatedText)+'"', score:65, reason:'텍스트 일치', textValue: truncatedText}, {duplicateScore:55, element: el});
+      if (textCandidate) c.push(textCandidate);
+    }
+    const robustXPath = buildRobustXPath(el);
+    if (robustXPath) {
+      const robustCandidate = enrichCandidateWithUniqueness({type:'xpath', selector:'xpath='+robustXPath, score:60, reason:'속성 기반 XPath', xpathValue: robustXPath}, {duplicateScore:55, element: el});
+      if (robustCandidate) c.push(robustCandidate);
+    }
+    const fullXPath = buildFullXPath(el);
+    if (fullXPath) {
+      const fullCandidate = enrichCandidateWithUniqueness({type:'xpath', selector:'xpath='+fullXPath, score:45, reason:'Full XPath (절대 경로)', xpathValue: fullXPath}, {duplicateScore:40, element: el, enableIndexing: false});
+      if (fullCandidate) c.push(fullCandidate);
+    }
+    const tagCandidate = enrichCandidateWithUniqueness({type:'tag', selector:el.tagName.toLowerCase(), score:20, reason:'태그 이름'}, {duplicateScore:30, allowZero:true, element: el});
+    if (tagCandidate) c.push(tagCandidate);
+    return c.filter(Boolean);
   }
 
   function getIframeContext(target) {
@@ -58,6 +435,233 @@
   let currentHighlightedElement = null;
   let overlayElement = null;
   let hoverTimeout = null;
+  const elementSelectionState = {
+    active: false,
+    mode: null, // null | 'root' | 'child'
+    currentElement: null,
+    parentElement: null,
+    highlightInfo: null,
+    childFlashTimeout: null
+  };
+
+  const overlayControls = {
+    container: null,
+    handle: null,
+    buttons: {},
+    status: null,
+    dragging: false,
+    dragOffsetX: 0,
+    dragOffsetY: 0
+  };
+
+  function setOverlayStatus(message, tone = 'info') {
+    if (!overlayControls.status) return;
+    overlayControls.status.textContent = message || '';
+    overlayControls.status.setAttribute('data-tone', tone || 'info');
+    overlayControls.status.style.display = message ? 'block' : 'none';
+  }
+
+  function updateOverlayControlsState() {
+    if (!overlayControls.buttons.start || !overlayControls.container) return;
+    overlayControls.buttons.start.disabled = !!isRecording;
+    overlayControls.buttons.stop.disabled = !isRecording;
+    overlayControls.container.toggleAttribute('data-selecting', !!elementSelectionState.mode);
+  }
+
+  function saveOverlayPosition(left, top) {
+    chrome.storage.local.set({overlayPosition: {left, top}});
+  }
+
+  function onOverlayDragMove(event) {
+    if (!overlayControls.dragging || !overlayControls.container) return;
+    const container = overlayControls.container;
+    const width = container.offsetWidth;
+    const height = container.offsetHeight;
+    let newLeft = event.clientX - overlayControls.dragOffsetX;
+    let newTop = event.clientY - overlayControls.dragOffsetY;
+    const margin = 8;
+    newLeft = Math.max(margin, Math.min(newLeft, window.innerWidth - width - margin));
+    newTop = Math.max(margin, Math.min(newTop, window.innerHeight - height - margin));
+    container.style.left = `${newLeft}px`;
+    container.style.top = `${newTop}px`;
+    container.style.right = '';
+    container.style.bottom = '';
+  }
+
+  function stopOverlayDrag() {
+    if (!overlayControls.dragging || !overlayControls.container) return;
+    overlayControls.dragging = false;
+    document.removeEventListener('mousemove', onOverlayDragMove, true);
+    document.removeEventListener('mouseup', stopOverlayDrag, true);
+    const rect = overlayControls.container.getBoundingClientRect();
+    saveOverlayPosition(rect.left, rect.top);
+  }
+
+  function startOverlayDrag(event) {
+    if (!overlayControls.container) return;
+    const rect = overlayControls.container.getBoundingClientRect();
+    overlayControls.dragging = true;
+    overlayControls.dragOffsetX = event.clientX - rect.left;
+    overlayControls.dragOffsetY = event.clientY - rect.top;
+    overlayControls.container.style.left = `${rect.left}px`;
+    overlayControls.container.style.top = `${rect.top}px`;
+    overlayControls.container.style.right = '';
+    overlayControls.container.style.bottom = '';
+    document.addEventListener('mousemove', onOverlayDragMove, true);
+    document.addEventListener('mouseup', stopOverlayDrag, true);
+    event.preventDefault();
+  }
+
+  function handleOverlayCommandResponse(command, response) {
+    if (!response || response.ok) {
+      if (command === 'start_record') {
+        setOverlayStatus('녹화를 시작했습니다.', 'success');
+      } else if (command === 'stop_record') {
+        setOverlayStatus('녹화를 중지했습니다.', 'success');
+      } else if (command === 'element_select') {
+        setOverlayStatus('요소 선택 모드를 시작합니다. 페이지에서 요소를 클릭하세요.', 'info');
+      }
+      return;
+    }
+    const reason = response.reason || 'unknown';
+    let message = '요청을 처리할 수 없습니다.';
+    if (reason === 'already_recording') {
+      message = '이미 녹화 중입니다.';
+    } else if (reason === 'no_active_tab') {
+      message = '활성 탭을 찾을 수 없습니다.';
+    } else if (reason === 'not_recording') {
+      message = '현재 녹화 중이 아닙니다.';
+    } else if (reason === 'selection_in_progress') {
+      message = '이미 요소 선택이 진행 중입니다.';
+    } else if (reason === 'parent_not_selected') {
+      message = '먼저 부모 요소를 선택하세요.';
+    } else if (reason === 'unsupported_action') {
+      message = '지원하지 않는 동작입니다.';
+    }
+    setOverlayStatus(message, 'error');
+  }
+
+  function sendOverlayCommand(command, options = {}) {
+    chrome.runtime.sendMessage({type: 'OVERLAY_COMMAND', command, options}, (response) => {
+      if (chrome.runtime.lastError) {
+        setOverlayStatus('DevTools 패널과 통신할 수 없습니다. 패널이 열려 있는지 확인하세요.', 'error');
+        return;
+      }
+      handleOverlayCommandResponse(command, response);
+    });
+  }
+
+  function createOverlayControls() {
+    if (overlayControls.container) return;
+    if (window !== window.top) return;
+    const container = document.createElement('div');
+    container.id = '__ai_test_overlay__';
+    container.style.position = 'fixed';
+    container.style.right = '24px';
+    container.style.bottom = '24px';
+    container.style.background = 'rgba(15, 23, 42, 0.65)';
+    container.style.backdropFilter = 'blur(12px)';
+    container.style.border = '1px solid rgba(255,255,255,0.18)';
+    container.style.borderRadius = '12px';
+    container.style.padding = '12px';
+    container.style.color = '#fff';
+    container.style.fontFamily = 'Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+    container.style.fontSize = '12px';
+    container.style.boxShadow = '0 12px 24px rgba(11, 15, 25, 0.35)';
+    container.style.zIndex = '2147483646';
+    container.style.minWidth = '200px';
+    container.style.userSelect = 'none';
+
+    const handle = document.createElement('div');
+    handle.textContent = 'Recorder Controls';
+    handle.style.display = 'flex';
+    handle.style.alignItems = 'center';
+    handle.style.justifyContent = 'space-between';
+    handle.style.fontWeight = '600';
+    handle.style.fontSize = '11px';
+    handle.style.textTransform = 'uppercase';
+    handle.style.letterSpacing = '0.08em';
+    handle.style.marginBottom = '10px';
+    handle.style.cursor = 'move';
+
+    const buttonsRow = document.createElement('div');
+    buttonsRow.style.display = 'flex';
+    buttonsRow.style.gap = '8px';
+    buttonsRow.style.flexWrap = 'nowrap';
+
+    const buttonStyle = 'flex:1 1 auto;padding:6px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.14);color:#fff;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.2s ease;text-align:center;';
+
+    const startBtn = document.createElement('button');
+    startBtn.textContent = 'Start';
+    startBtn.style.cssText = buttonStyle;
+    startBtn.addEventListener('click', () => {
+      setOverlayStatus('녹화를 시작하는 중...', 'info');
+      sendOverlayCommand('start_record');
+    });
+
+    const stopBtn = document.createElement('button');
+    stopBtn.textContent = 'Stop';
+    stopBtn.style.cssText = buttonStyle;
+    stopBtn.addEventListener('click', () => {
+      setOverlayStatus('녹화를 중지하는 중...', 'info');
+      sendOverlayCommand('stop_record');
+    });
+
+    const selectBtn = document.createElement('button');
+    selectBtn.textContent = 'Select';
+    selectBtn.style.cssText = buttonStyle;
+    selectBtn.addEventListener('click', () => {
+      setOverlayStatus('요소 선택 모드를 준비하는 중...', 'info');
+      sendOverlayCommand('element_select');
+    });
+
+    buttonsRow.appendChild(startBtn);
+    buttonsRow.appendChild(stopBtn);
+    buttonsRow.appendChild(selectBtn);
+
+    const status = document.createElement('div');
+    status.style.marginTop = '10px';
+    status.style.fontSize = '11px';
+    status.style.padding = '6px 8px';
+    status.style.borderRadius = '8px';
+    status.style.background = 'rgba(255,255,255,0.12)';
+    status.style.display = 'none';
+
+    container.appendChild(handle);
+    container.appendChild(buttonsRow);
+    container.appendChild(status);
+
+    handle.addEventListener('mousedown', startOverlayDrag, true);
+
+    const observer = new MutationObserver(() => {
+      updateOverlayControlsState();
+    });
+    observer.observe(container, {attributes: true});
+
+    overlayControls.container = container;
+    overlayControls.handle = handle;
+    overlayControls.buttons = {start: startBtn, stop: stopBtn, select: selectBtn};
+    overlayControls.status = status;
+
+    document.body.appendChild(container);
+
+    chrome.storage.local.get({overlayPosition: null}, (data) => {
+      const pos = data.overlayPosition;
+      if (pos && typeof pos.left === 'number' && typeof pos.top === 'number') {
+        container.style.left = `${pos.left}px`;
+        container.style.top = `${pos.top}px`;
+        container.style.right = '';
+        container.style.bottom = '';
+      }
+    });
+
+    updateOverlayControlsState();
+    setOverlayStatus('', 'info');
+  }
+
+  function initOverlayControls() {
+    createOverlayControls();
+  }
 
   // 페이지 로드 시 녹화 상태 복원
   chrome.storage.local.get(['recording'], (result) => {
@@ -180,6 +784,54 @@
       overlayElement.remove();
       overlayElement = null;
     }
+  }
+
+  function applySelectionParentHighlight(element) {
+    if (!element || element.nodeType !== 1) return;
+    if (elementSelectionState.highlightInfo && elementSelectionState.highlightInfo.element !== element) {
+      clearSelectionParentHighlight();
+    }
+    if (!elementSelectionState.highlightInfo) {
+      elementSelectionState.highlightInfo = {
+        element,
+        outline: element.style.outline,
+        outlineOffset: element.style.outlineOffset
+      };
+      element.style.outline = '2px dashed rgba(255,152,0,0.95)';
+      element.style.outlineOffset = '2px';
+    }
+  }
+
+  function clearSelectionParentHighlight() {
+    if (elementSelectionState.highlightInfo && elementSelectionState.highlightInfo.element) {
+      const {element, outline, outlineOffset} = elementSelectionState.highlightInfo;
+      try {
+        element.style.outline = outline || '';
+        element.style.outlineOffset = outlineOffset || '';
+      } catch (e) {}
+    }
+    elementSelectionState.highlightInfo = null;
+  }
+
+  function flashSelectionElement(element, duration = 1500) {
+    if (!element || element.nodeType !== 1) return;
+    if (elementSelectionState.childFlashTimeout) {
+      clearTimeout(elementSelectionState.childFlashTimeout);
+      elementSelectionState.childFlashTimeout = null;
+    }
+    const prev = {
+      outline: element.style.outline,
+      outlineOffset: element.style.outlineOffset
+    };
+    element.style.outline = '2px solid rgba(33,150,243,0.9)';
+    element.style.outlineOffset = '2px';
+    elementSelectionState.childFlashTimeout = setTimeout(() => {
+      try {
+        element.style.outline = prev.outline || '';
+        element.style.outlineOffset = prev.outlineOffset || '';
+      } catch (e) {}
+      elementSelectionState.childFlashTimeout = null;
+    }, duration);
   }
 
   // 마우스 오버 이벤트 (녹화 중일 때만)
@@ -321,7 +973,76 @@
   }
 
   document.addEventListener('click', function(e){
-    if (!isRecording) return; // 녹화 중이 아니면 무시
+    if (elementSelectionState.mode) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      const target = e.target;
+      if (!target || target === document.body || target === document.documentElement || target.id === '__ai_test_recorder_overlay__' || (target.closest && target.closest('#__ai_test_recorder_overlay__'))) {
+        chrome.runtime.sendMessage({
+          type: 'ELEMENT_SELECTION_ERROR',
+          stage: elementSelectionState.mode === 'child' ? 'child' : 'root',
+          reason: '선택할 수 없는 영역입니다. 다른 요소를 선택하세요.'
+        });
+        return;
+      }
+
+      if (elementSelectionState.mode === 'root') {
+        elementSelectionState.active = true;
+        elementSelectionState.currentElement = target;
+        elementSelectionState.parentElement = target;
+        applySelectionParentHighlight(target);
+        const selectors = (getSelectorCandidates(target) || []).map(c => ({
+          ...c,
+          relation: c.relation || 'global'
+        }));
+        chrome.runtime.sendMessage({
+          type: 'ELEMENT_SELECTION_PICKED',
+          stage: 'root',
+          selectors,
+          element: {
+            tag: target.tagName,
+            text: (target.innerText || target.textContent || '').trim().slice(0, 80),
+            id: target.id || null,
+            classList: Array.from(target.classList || []),
+            iframeContext: getIframeContext(target)
+          }
+        });
+        elementSelectionState.mode = null;
+        return;
+      }
+
+      if (elementSelectionState.mode === 'child') {
+        if (!elementSelectionState.parentElement || !elementSelectionState.parentElement.contains(target) || target === elementSelectionState.parentElement) {
+          chrome.runtime.sendMessage({
+            type: 'ELEMENT_SELECTION_ERROR',
+            stage: 'child',
+            reason: '선택한 요소가 부모 요소 내부에 있지 않습니다.'
+          });
+          return;
+        }
+        elementSelectionState.currentElement = target;
+        applySelectionParentHighlight(target);
+        const selectors = getChildSelectorCandidates(elementSelectionState.parentElement, target);
+        flashSelectionElement(target);
+        chrome.runtime.sendMessage({
+          type: 'ELEMENT_SELECTION_PICKED',
+          stage: 'child',
+          selectors,
+          element: {
+            tag: target.tagName,
+            text: (target.innerText || target.textContent || '').trim().slice(0, 80),
+            id: target.id || null,
+            classList: Array.from(target.classList || [])
+          }
+        });
+        elementSelectionState.parentElement = target;
+        elementSelectionState.mode = null;
+        return;
+      }
+    }
+
+    if (!isRecording || elementSelectionState.active) return; // 녹화 중이 아니거나 요소 선택 진행 중이면 무시
     try {
       const target = e.target;
       
@@ -335,6 +1056,15 @@
       chrome.runtime.sendMessage({type:'EVENT_RECORDED', event:ev});
     } catch(err){ console.error(err); }
   }, true);
+
+  ['mousedown','mouseup','pointerdown','pointerup'].forEach(evt => {
+    document.addEventListener(evt, function(e) {
+      if (!elementSelectionState.mode) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    }, true);
+  });
 
   // input 이벤트에 디바운스 적용
   document.addEventListener('input', function(e){
@@ -383,9 +1113,21 @@
 
   function findElementBySelector(selector) {
     try {
-      if (selector.startsWith('text="')) {
-        const txt = selector.slice(6, -1);
-        return Array.from(document.querySelectorAll('*')).find(x => (x.innerText||'').trim().includes(txt));
+      if (!selector) return null;
+      if (selector.startsWith('xpath=')) {
+        const xpathExpression = selector.slice(6);
+        const result = document.evaluate(xpathExpression, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        return result.singleNodeValue || null;
+      }
+      if (selector.startsWith('//') || selector.startsWith('(')) {
+        const result = document.evaluate(selector, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        return result.singleNodeValue || null;
+      }
+      if (selector.startsWith('text="') || selector.startsWith("text='")) {
+        const textLiteral = selector.replace(/^text=/, '');
+        const trimmed = textLiteral.replace(/^['"]|['"]$/g, '');
+        const decoded = trimmed.replace(/\\"/g, '"');
+        return Array.from(document.querySelectorAll('*')).find(x => (x.innerText||'').trim().includes(decoded));
       } else if (selector.startsWith('#')) {
         return document.querySelector(selector);
       } else if (selector.startsWith('.')) {
@@ -399,6 +1141,241 @@
     } catch(e) {
       return null;
     }
+  }
+
+  function inferSelectorType(selector) {
+    if (!selector || typeof selector !== 'string') return null;
+    const trimmed = selector.trim();
+    if (trimmed.startsWith('xpath=')) return 'xpath';
+    if (trimmed.startsWith('//') || trimmed.startsWith('(')) return 'xpath';
+    if (trimmed.startsWith('text=')) return 'text';
+    if (trimmed.startsWith('#') || trimmed.startsWith('.') || trimmed.startsWith('[')) return 'css';
+    return 'css';
+  }
+
+  function normalizeText(text) {
+    return (text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function getChildSelectorCandidates(parent, child) {
+    if (!parent || !child) return [];
+    const results = [];
+    const seen = new Set();
+
+    function pushCandidate(candidate) {
+      if (!candidate || !candidate.selector) return;
+      const key = (candidate.type || inferSelectorType(candidate.selector)) + '::' + candidate.selector;
+      if (seen.has(key)) return;
+      seen.add(key);
+      results.push(candidate);
+    }
+
+    const relativeCss = buildRelativeCssSelector(parent, child);
+    if (relativeCss) {
+      const cssCandidate = enrichCandidateWithUniqueness({
+        type: 'css',
+        selector: 'css=' + relativeCss,
+        score: 88,
+        reason: '부모 요소 기준 CSS 경로',
+        relation: 'relative'
+      }, {
+        skipGlobalCheck: true,
+        contextElement: parent,
+        contextLabel: '부모',
+        duplicateScore: 70,
+        element: child
+      });
+      if (cssCandidate) pushCandidate(cssCandidate);
+    }
+
+    const relativeXPath = buildRelativeXPathSelector(parent, child);
+    if (relativeXPath) {
+      const xpathCandidate = enrichCandidateWithUniqueness({
+        type: 'xpath',
+        selector: 'xpath=' + relativeXPath,
+        score: 85,
+        reason: '부모 요소 기준 XPath 경로',
+        relation: 'relative',
+        xpathValue: relativeXPath
+      }, {
+        skipGlobalCheck: true,
+        contextElement: parent,
+        contextLabel: '부모',
+        duplicateScore: 68,
+        element: child
+      });
+      if (xpathCandidate) pushCandidate(xpathCandidate);
+    }
+
+    const baseCandidates = getSelectorCandidates(child) || [];
+    baseCandidates.forEach((cand) => {
+      pushCandidate({
+        ...cand,
+        relation: cand.relation || 'global'
+      });
+    });
+
+    return results;
+  }
+
+  function collectSelectorInfos(ev) {
+    const infos = [];
+    const seen = new Set();
+
+    function pushInfo(selector, type, extra = {}) {
+      if (!selector) return;
+      const key = selector + '::' + (type || '');
+      if (seen.has(key)) return;
+      seen.add(key);
+      infos.push({
+        selector,
+        type: type || inferSelectorType(selector),
+        score: extra.score || 0,
+        textValue: extra.textValue || null,
+        xpathValue: extra.xpathValue || null,
+        matchMode: extra.matchMode || null
+      });
+    }
+
+    if (ev && ev.primarySelector) {
+      pushInfo(ev.primarySelector, ev.primarySelectorType || inferSelectorType(ev.primarySelector), {
+        score: 100,
+        textValue: ev.primarySelectorText || null,
+        xpathValue: ev.primarySelectorXPath || null,
+        matchMode: ev.primarySelectorMatchMode || null
+      });
+    }
+
+    if (ev && Array.isArray(ev.selectorCandidates)) {
+      const sortedCandidates = [...ev.selectorCandidates].sort((a, b) => (b.score || 0) - (a.score || 0));
+      for (const cand of sortedCandidates) {
+        if (!cand || !cand.selector) continue;
+        pushInfo(cand.selector, cand.type || inferSelectorType(cand.selector), {
+          score: cand.score || 0,
+          textValue: cand.textValue || null,
+          xpathValue: cand.xpathValue || null,
+          matchMode: cand.matchMode || null
+        });
+      }
+    }
+
+    if (ev && ev.tag) {
+      pushInfo(ev.tag.toLowerCase(), 'tag', {score: 1});
+    }
+
+    return infos;
+  }
+
+  function findElementWithInfo(info) {
+    if (!info) return null;
+    const type = info.type || inferSelectorType(info.selector || '');
+    if (type === 'text') {
+      const targetText = normalizeText(info.textValue) || null;
+      if (targetText) {
+        const matchMode = info.matchMode || 'contains';
+        const match = Array.from(document.querySelectorAll('*')).find(el => {
+          const elText = normalizeText(el.innerText || el.textContent || '');
+          if (!elText) return false;
+          return matchMode === 'exact' ? elText === targetText : elText.includes(targetText);
+        });
+        if (match) return match;
+      }
+    }
+    if (type === 'xpath') {
+      const expression = info.xpathValue || (info.selector || '').replace(/^xpath=/, '');
+      if (expression) {
+        try {
+          const res = document.evaluate(expression, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+          if (res.singleNodeValue) return res.singleNodeValue;
+        } catch(err) {
+          // ignore xpath errors
+        }
+      }
+    }
+    return findElementBySelector(info.selector);
+  }
+
+  async function locateElementForEvent(ev, timeoutMs = 5000) {
+    const infos = collectSelectorInfos(ev);
+    if (infos.length === 0) return {element: null, info: null};
+    const start = performance.now();
+    const retryInterval = 200;
+    while (performance.now() - start < timeoutMs) {
+      for (const info of infos) {
+        const el = findElementWithInfo(info);
+        if (el) {
+          return {element: el, info};
+        }
+      }
+      await new Promise(r => setTimeout(r, retryInterval));
+    }
+    // one final attempt before giving up
+    for (const info of infos) {
+      const el = findElementWithInfo(info);
+      if (el) {
+        return {element: el, info};
+      }
+    }
+    return {element: null, info: null};
+  }
+
+  function findElementInScope(entry, scope) {
+    if (!entry || !entry.selector) return null;
+    const selector = entry.selector;
+    const type = entry.type || inferSelectorType(selector);
+    const isRelative = entry.relation === 'relative';
+    const currentScope = scope && scope.nodeType === 1 ? scope : document;
+
+    const runGlobal = () => findElementBySelector(selector);
+
+    try {
+      if (isRelative && currentScope !== document) {
+        if (type === 'xpath' || selector.startsWith('xpath=')) {
+          const expression = selector.startsWith('xpath=') ? selector.slice(6) : selector;
+          const doc = currentScope.ownerDocument || document;
+          const res = doc.evaluate(expression, currentScope, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+          return res.singleNodeValue || null;
+        }
+        if (type === 'text' || selector.startsWith('text=')) {
+          const raw = selector.replace(/^text=/, '');
+          const trimmed = raw.replace(/^['"]|['"]$/g, '');
+          const targetText = normalizeText(trimmed);
+          const matchMode = entry.matchMode || 'contains';
+          if (!targetText) return null;
+          const elements = currentScope.querySelectorAll('*');
+          for (const el of elements) {
+            const txt = normalizeText(el.innerText || el.textContent || '');
+            if (!txt) continue;
+            if (matchMode === 'exact' ? txt === targetText : txt.includes(targetText)) {
+              return el;
+            }
+          }
+          return null;
+        }
+        let cssSelector = selector;
+        if (cssSelector.startsWith('css=')) {
+          cssSelector = cssSelector.slice(4);
+        }
+        return currentScope.querySelector(cssSelector);
+      }
+      return runGlobal();
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function findElementByPath(path) {
+    if (!Array.isArray(path) || path.length === 0) return null;
+    let currentElement = null;
+    let currentScope = document;
+    for (const entry of path) {
+      const scope = entry.relation === 'relative' ? (currentElement || currentScope) : document;
+      const el = findElementInScope(entry, scope);
+      if (!el) return null;
+      currentElement = el;
+      currentScope = el;
+    }
+    return currentElement;
   }
 
   // 탭 업데이트 감지하여 녹화 상태 복원
@@ -421,6 +1398,15 @@
         isRecording = true;
         // 녹화 상태를 Storage에 저장
         chrome.storage.local.set({recording: true});
+        elementSelectionState.mode = null;
+        elementSelectionState.active = false;
+        elementSelectionState.parentElement = null;
+        elementSelectionState.currentElement = null;
+        clearSelectionParentHighlight();
+        if (elementSelectionState.childFlashTimeout) {
+          clearTimeout(elementSelectionState.childFlashTimeout);
+          elementSelectionState.childFlashTimeout = null;
+        }
         sendResponse({ok: true});
         return;
       }
@@ -429,6 +1415,15 @@
         // 녹화 상태를 Storage에서 제거
         chrome.storage.local.remove(['recording']);
         removeHighlight();
+        elementSelectionState.mode = null;
+        elementSelectionState.active = false;
+        elementSelectionState.parentElement = null;
+        elementSelectionState.currentElement = null;
+        clearSelectionParentHighlight();
+        if (elementSelectionState.childFlashTimeout) {
+          clearTimeout(elementSelectionState.childFlashTimeout);
+          elementSelectionState.childFlashTimeout = null;
+        }
         // 모든 대기 중인 타이머 취소
         inputTimers.forEach((timer, target) => {
           clearTimeout(timer);
@@ -438,157 +1433,194 @@
         return;
       }
 
-      if (msg.type === 'REPLAY_START') {
-        const events = msg.events || [];
-        for (let i = 0; i < events.length; i++) {
-          const ev = events[i];
-          let found = null;
-          let usedSelector = null;
-          
-          // 1. primarySelector를 우선적으로 사용
-          if (ev.primarySelector) {
-            found = findElementBySelector(ev.primarySelector);
-            if (found) {
-              usedSelector = ev.primarySelector;
-            }
-          }
-          
-          // 2. primarySelector가 없거나 찾지 못한 경우 selectorCandidates 시도
-          if (!found && ev.selectorCandidates && ev.selectorCandidates.length > 0) {
-            // 점수가 높은 순서대로 정렬
-            const sortedCandidates = [...ev.selectorCandidates].sort((a, b) => (b.score || 0) - (a.score || 0));
-            
-            for (const c of sortedCandidates) {
-              if (!c.selector) continue;
-              found = findElementBySelector(c.selector);
-              if (found) {
-                usedSelector = c.selector;
-                break;
+      if (msg.type === 'ELEMENT_SELECTION_START') {
+        elementSelectionState.active = true;
+        elementSelectionState.mode = 'root';
+        elementSelectionState.parentElement = null;
+        elementSelectionState.currentElement = null;
+        clearSelectionParentHighlight();
+        if (elementSelectionState.childFlashTimeout) {
+          clearTimeout(elementSelectionState.childFlashTimeout);
+          elementSelectionState.childFlashTimeout = null;
+        }
+        sendResponse({ok: true});
+        return;
+      }
+
+      if (msg.type === 'ELEMENT_SELECTION_PICK_CHILD') {
+        if (!elementSelectionState.active || !elementSelectionState.currentElement) {
+          sendResponse({ok: false, reason: 'parent_not_selected'});
+          return;
+        }
+        elementSelectionState.mode = 'child';
+        elementSelectionState.parentElement = elementSelectionState.currentElement;
+        applySelectionParentHighlight(elementSelectionState.parentElement);
+        sendResponse({ok: true});
+        return;
+      }
+
+      if (msg.type === 'ELEMENT_SELECTION_CANCEL') {
+        elementSelectionState.mode = null;
+        elementSelectionState.active = false;
+        elementSelectionState.parentElement = null;
+        elementSelectionState.currentElement = null;
+        clearSelectionParentHighlight();
+        if (elementSelectionState.childFlashTimeout) {
+          clearTimeout(elementSelectionState.childFlashTimeout);
+          elementSelectionState.childFlashTimeout = null;
+        }
+        sendResponse({ok: true});
+        chrome.runtime.sendMessage({type: 'ELEMENT_SELECTION_CANCELLED'});
+        return;
+      }
+
+      if (msg.type === 'ELEMENT_SELECTION_EXECUTE') {
+        const path = msg.path || [];
+        const action = msg.action || '';
+        const target = findElementByPath(path);
+        if (!target) {
+          sendResponse({ok: false, reason: 'not_found'});
+          return;
+        }
+        if (action === 'click') {
+          try {
+            target.scrollIntoView({behavior: 'smooth', block: 'center'});
+            setTimeout(() => {
+              try {
+                target.focus({preventScroll: true});
+              } catch (focusErr) {
+                try { target.focus(); } catch (focusErr2) {}
               }
-            }
-          }
-          
-          // 3. 여전히 찾지 못한 경우 태그명으로 시도
-          if (!found && ev.tag) {
-            const tagElements = document.querySelectorAll(ev.tag.toLowerCase());
-            if (tagElements.length > 0) {
-              // 같은 위치에 있는 요소 찾기 (대략적인 위치 비교)
-              if (ev.clientRect) {
-                for (const el of tagElements) {
-                  const rect = el.getBoundingClientRect();
-                  const distance = Math.abs(rect.x - ev.clientRect.x) + Math.abs(rect.y - ev.clientRect.y);
-                  if (distance < 100) { // 100px 이내
-                    found = el;
-                    usedSelector = ev.tag.toLowerCase();
-                    break;
-                  }
-                }
+              const style = window.getComputedStyle(target);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                sendResponse({ok: false, reason: 'element_not_visible'});
+                return;
               }
-              // 위치로 찾지 못하면 첫 번째 요소 사용
-              if (!found && tagElements.length === 1) {
-                found = tagElements[0];
-                usedSelector = ev.tag.toLowerCase();
+              if (target.disabled) {
+                sendResponse({ok: false, reason: 'element_disabled'});
+                return;
               }
-            }
+              try {
+                target.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+                target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                target.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+              } catch (dispatchErr) {
+                sendResponse({ok: false, reason: dispatchErr.message || 'click_dispatch_failed'});
+                return;
+              }
+              sendResponse({ok: true});
+            }, 120);
+          } catch (err) {
+            sendResponse({ok: false, reason: err.message || 'click_failed'});
           }
-          
-          if (!found) {
+        } else {
+          sendResponse({ok: false, reason: 'unsupported_action'});
+        }
+        return true;
+      }
+
+      if (msg.type === 'REPLAY_EXECUTE_STEP') {
+        const { event: ev, index = 0, total = 0 } = msg;
+        (async () => {
+          const {element, info} = await locateElementForEvent(ev, msg.timeoutMs || 6000);
+          if (!element) {
             chrome.runtime.sendMessage({
               type: 'REPLAY_STEP_RESULT',
               ok: false,
               reason: 'not_found',
-              step: i + 1,
-              total: events.length,
+              stepIndex: index,
+              total,
+              selector: info && info.selector ? info.selector : (ev && ev.primarySelector) || null,
               ev
             });
-            continue;
+            sendResponse({ok:false, reason:'not_found'});
+            return;
           }
-          
-          // 요소 강조 표시
-          found.style.outline = '3px solid rgba(0,150,136,0.6)';
-          found.style.outlineOffset = '2px';
-          await new Promise(r=>setTimeout(r, 500));
-          
-          // 액션 실행
-          try {
-            if (ev.action === 'click') {
-              found.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              await new Promise(r=>setTimeout(r, 350));
-              found.focus();
 
-              let clickable = true;
-              let reason = '';
-              const style = window.getComputedStyle(found);
-              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-                clickable = false;
-                reason = 'element not visible';
-              } else if (found.disabled) {
-                clickable = false;
-                reason = 'element disabled';
-              } else {
-                try {
-                  found.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
-                  found.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
-                  found.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
-                  found.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                } catch(e) {
-                  clickable = false;
-                  reason = e.message || 'click event dispatch error';
-                }
+          let navigationTriggered = false;
+          const beforeUnloadHandler = () => {
+            navigationTriggered = true;
+          };
+          window.addEventListener('beforeunload', beforeUnloadHandler);
+
+          const originalOutline = element.style.outline;
+          const originalOutlineOffset = element.style.outlineOffset;
+          let success = false;
+          let failureReason = '';
+
+          try {
+            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            await new Promise(r => setTimeout(r, 200));
+            try {
+              element.focus({ preventScroll: true });
+            } catch (focusErr) {
+              try {
+                element.focus();
+              } catch (focusErr2) {
+                // ignore
               }
-              if (!clickable) {
-                chrome.runtime.sendMessage({
-                  type: 'REPLAY_STEP_RESULT',
-                  ok: false,
-                  reason: reason || 'unhandled click error',
-                  used: found.tagName,
-                  selector: usedSelector,
-                  step: i + 1,
-                  total: events.length,
-                  ev
-                });
-                found.style.outline = '';
-                continue;
-              }
-            } else if (ev.action === 'input') {
-              found.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              await new Promise(r=>setTimeout(r, 300));
-              found.focus();
-              found.value = ev.value || '';
-              // input 이벤트 발생
-              found.dispatchEvent(new Event('input', {bubbles: true}));
-              found.dispatchEvent(new Event('change', {bubbles: true}));
             }
-          } catch(e) {
-            console.error('Replay action error:', e);
-            chrome.runtime.sendMessage({
-              type: 'REPLAY_STEP_RESULT',
-              ok: false,
-              reason: 'action_failed: ' + e.message,
-              step: i + 1,
-              total: events.length,
-              ev
-            });
-            found.style.outline = '';
-            continue;
+            element.style.outline = '3px solid rgba(0,150,136,0.6)';
+            element.style.outlineOffset = '2px';
+
+            if (ev.action === 'click') {
+              const style = window.getComputedStyle(element);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                throw new Error('element not visible');
+              }
+              if (element.disabled) {
+                throw new Error('element disabled');
+              }
+              element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+              element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+              element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+              element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            } else if (ev.action === 'input') {
+              const valueToSet = ev.value || '';
+              if ('value' in element) {
+                element.value = valueToSet;
+              } else if (element.isContentEditable) {
+                element.textContent = valueToSet;
+              }
+              element.dispatchEvent(new Event('input', { bubbles: true }));
+              element.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+
+            success = true;
+          } catch (err) {
+            failureReason = err && err.message ? err.message : 'unknown error';
+          } finally {
+            window.removeEventListener('beforeunload', beforeUnloadHandler);
+            try {
+              element.style.outline = originalOutline;
+              element.style.outlineOffset = originalOutlineOffset;
+            } catch (e) {
+              // ignore style cleanup errors (element might be detached)
+            }
           }
-          
-          // 강조 표시 제거
-          found.style.outline = '';
-          await new Promise(r=>setTimeout(r, 300));
-          
-          chrome.runtime.sendMessage({
+
+          const usedSelector = info && info.selector ? info.selector : (ev && ev.primarySelector) || (ev && ev.tag ? ev.tag.toLowerCase() : null);
+          const payload = {
             type: 'REPLAY_STEP_RESULT',
-            ok: true,
-            used: found.tagName,
+            ok: success,
+            reason: success ? undefined : failureReason,
+            used: element && element.tagName,
             selector: usedSelector,
-            step: i + 1,
-            total: events.length,
+            stepIndex: index,
+            total,
+            navigation: navigationTriggered,
             ev
-          });
-        }
-        chrome.runtime.sendMessage({type:'REPLAY_FINISHED'});
-        sendResponse({ok:true});
+          };
+          chrome.runtime.sendMessage(payload);
+
+          if (success) {
+            sendResponse({ok:true, navigation: navigationTriggered});
+          } else {
+            sendResponse({ok:false, reason: failureReason});
+          }
+        })();
+        return true;
       }
     })();
     return true;
