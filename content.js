@@ -88,16 +88,31 @@
       const segment = buildCssSegment(current);
       if (!segment) return null;
       segments.unshift(segment);
+      const cssPath = segments.join(' > ');
+      const selectorString = contextElement ? ':scope ' + cssPath : cssPath;
+      const parsed = parseSelectorForMatching('css=' + selectorString, 'css');
+      const targetScope = contextElement || document;
+      if (countMatchesForSelector(parsed, targetScope) === 1) {
+        if (!contextElement && cssPath.startsWith('html:nth-of-type(1) > ')) {
+          return cssPath.replace(/^html:nth-of-type\(1\)\s*>\s*/, '');
+        }
+        return contextElement ? ':scope ' + cssPath : cssPath;
+      }
       current = current.parentElement;
-      if (!current && contextElement) {
-        return null;
+      if (!current) break;
+      if (!contextElement && current === document.documentElement) {
+        break;
       }
     }
     if (contextElement) {
-      if (segments.length === 0) return null;
-      return ':scope ' + segments.join(' > ');
+      const relativePath = segments.join(' > ');
+      return relativePath ? ':scope ' + relativePath : null;
     }
-    return segments.join(' > ');
+    let finalPath = segments.join(' > ');
+    if (finalPath.startsWith('html:nth-of-type(1) > ')) {
+      finalPath = finalPath.replace(/^html:nth-of-type\(1\)\s*>\s*/, '');
+    }
+    return finalPath;
   }
 
   function escapeXPathLiteral(value) {
@@ -1218,6 +1233,56 @@
     return results;
   }
 
+  function getParentSelectorCandidates(child, parent) {
+    if (!child || !parent) return [];
+    const results = [];
+    const seen = new Set();
+
+    function pushCandidate(candidate) {
+      if (!candidate || !candidate.selector) return;
+      const key = (candidate.type || inferSelectorType(candidate.selector)) + '::' + candidate.selector;
+      if (seen.has(key)) return;
+      seen.add(key);
+      results.push(candidate);
+    }
+
+    let current = parent;
+    let depth = 1;
+    while (current && current.nodeType === 1) {
+      const steps = Array(depth).fill('..').join('/');
+      const candidate = enrichCandidateWithUniqueness({
+        type: 'xpath',
+        selector: 'xpath=' + steps,
+        score: Math.max(70, 82 - (depth - 1) * 5),
+        reason: depth === 1 ? '직접 상위 요소' : `${depth}단계 상위 요소`,
+        relation: 'relative',
+        xpathValue: steps
+      }, {
+        skipGlobalCheck: true,
+        contextElement: child,
+        contextLabel: '현재 요소',
+        duplicateScore: Math.max(60, 70 - (depth - 1) * 5),
+        element: current
+      });
+      if (candidate) pushCandidate(candidate);
+      if (!current.parentElement || current === document.documentElement) {
+        break;
+      }
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    const parentCandidates = getSelectorCandidates(parent) || [];
+    parentCandidates.forEach((cand) => {
+      pushCandidate({
+        ...cand,
+        relation: cand.relation || 'global'
+      });
+    });
+
+    return results;
+  }
+
   function collectSelectorInfos(ev) {
     const infos = [];
     const seen = new Set();
@@ -1455,6 +1520,42 @@
         elementSelectionState.mode = 'child';
         elementSelectionState.parentElement = elementSelectionState.currentElement;
         applySelectionParentHighlight(elementSelectionState.parentElement);
+        sendResponse({ok: true});
+        return;
+      }
+
+      if (msg.type === 'ELEMENT_SELECTION_PICK_PARENT') {
+        if (!elementSelectionState.active || !elementSelectionState.currentElement) {
+          sendResponse({ok: false, reason: 'current_not_selected'});
+          return;
+        }
+        let current = elementSelectionState.currentElement;
+        let parent = current ? current.parentElement : null;
+        while (parent && parent.nodeType !== 1) {
+          parent = parent.parentElement;
+        }
+        if (!parent) {
+          sendResponse({ok: false, reason: 'no_parent'});
+          return;
+        }
+        elementSelectionState.currentElement = parent;
+        elementSelectionState.parentElement = parent;
+        elementSelectionState.mode = null;
+        applySelectionParentHighlight(parent);
+        flashSelectionElement(parent);
+        const selectors = getParentSelectorCandidates(current, parent);
+        chrome.runtime.sendMessage({
+          type: 'ELEMENT_SELECTION_PICKED',
+          stage: 'parent',
+          selectors,
+          element: {
+            tag: parent.tagName,
+            text: (parent.innerText || parent.textContent || '').trim().slice(0, 80),
+            id: parent.id || null,
+            classList: Array.from(parent.classList || []),
+            iframeContext: getIframeContext(parent)
+          }
+        });
         sendResponse({ok: true});
         return;
       }

@@ -43,6 +43,22 @@ const NAVIGATION_RECOVERY_DELAY_MS = 800;
 const DOM_COMPLETE_DELAY_MS = 250;
 const MAX_NAVIGATION_WAIT_MS = 15000;
 
+function normalizeRequestedUrl(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^\/\//.test(trimmed)) {
+    return 'https:' + trimmed;
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
+    return trimmed;
+  }
+  return 'https://' + trimmed;
+}
+
 const selectionState = {
   active: false,
   stage: 'idle', // idle | await-root | await-candidate | await-action | await-child
@@ -71,7 +87,11 @@ function triggerStartRecording(options = {}, callback) {
     return;
   }
   const urlInput = document.getElementById('test-url');
-  const requestedUrl = options.url !== undefined ? options.url : (urlInput ? urlInput.value.trim() : '');
+  const rawUrl = options.url !== undefined ? options.url : (urlInput ? urlInput.value : '');
+  const requestedUrl = normalizeRequestedUrl(rawUrl);
+  if (urlInput && requestedUrl && urlInput.value !== requestedUrl) {
+    urlInput.value = requestedUrl;
+  }
 
   chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
     if (!tabs || !tabs[0]) {
@@ -968,17 +988,22 @@ function startParentSelection() {
     setElementStatus('먼저 후보를 선택하세요.', 'error');
     return;
   }
-  if (selectionState.stack.length <= 1) {
-    setElementStatus('상위 요소가 없습니다.', 'info');
-    return;
-  }
-  selectionState.stack.pop();
-  const newCurrent = getCurrentSelectionNode();
-  renderSelectionPath();
-  renderSelectionCandidates(newCurrent);
+  selectionState.stage = 'await-parent';
   updateSelectionActionsVisibility();
-  updateSelectionCodePreview();
-  setElementStatus('상위 요소를 다시 선택했습니다.', 'info');
+  setElementStatus('상위 요소 정보를 가져오는 중입니다...', 'info');
+  sendSelectionMessage({type: 'ELEMENT_SELECTION_PICK_PARENT'}, (resp) => {
+    if (resp && resp.ok === false) {
+      selectionState.stage = 'await-action';
+      updateSelectionActionsVisibility();
+      let message = '상위 요소를 찾을 수 없습니다.';
+      if (resp.reason === 'no_parent') {
+        message = '더 이상 상위 요소가 없습니다.';
+      } else if (resp.reason === 'current_not_selected') {
+        message = '먼저 요소를 선택하세요.';
+      }
+      setElementStatus(message, 'error');
+    }
+  });
 }
 
 function buildManualActionEntry(actionType, path, options = {}) {
@@ -1024,6 +1049,56 @@ function loadManualActions(callback) {
   });
 }
 
+function emitManualActionLines(lines, action, frameworkLower, languageLower, indent) {
+  if (!lines || !action) return;
+  const actionLines = buildManualActionCode(action, frameworkLower, languageLower, indent);
+  if (!Array.isArray(actionLines) || !actionLines.length) return;
+  actionLines.forEach((line) => lines.push(line));
+}
+
+function buildActionTimeline(events, manualList) {
+  const timeline = [];
+  let sequence = 0;
+  let maxEventTimestamp = 0;
+  if (Array.isArray(events)) {
+    events.forEach((event, index) => {
+      const timestamp = typeof event.timestamp === 'number' ? event.timestamp : 0;
+      if (timestamp > maxEventTimestamp) {
+        maxEventTimestamp = timestamp;
+      }
+      timeline.push({
+        kind: 'event',
+        time: timestamp,
+        sequence: sequence++,
+        event,
+        selectorInfo: selectSelectorForEvent(event)
+      });
+    });
+  }
+
+  let manualFallbackOffset = 0;
+  const manualListSafe = Array.isArray(manualList) ? manualList : [];
+  manualListSafe.forEach((action) => {
+    if (!action || !Array.isArray(action.path) || !action.path.length) return;
+    const created = typeof action.createdAt === 'number'
+      ? action.createdAt
+      : (maxEventTimestamp || Date.now()) + manualFallbackOffset;
+    manualFallbackOffset += 1;
+    timeline.push({
+      kind: 'manual',
+      time: created,
+      sequence: sequence++,
+      action
+    });
+  });
+
+  timeline.sort((a, b) => {
+    if (a.time !== b.time) return a.time - b.time;
+    return a.sequence - b.sequence;
+  });
+  return timeline;
+}
+
 function applySelectionAction(actionType, options = {}) {
   const path = buildSelectionPathArray();
   if (!path.length) {
@@ -1031,8 +1106,17 @@ function applySelectionAction(actionType, options = {}) {
     return;
   }
   if (actionType === 'commit') {
-    setElementStatus('현재 선택을 코드에 반영했습니다.', 'success');
-    updateCode();
+    const entry = buildManualActionEntry('chain', path, options);
+    if (!entry) {
+      setElementStatus('현재 선택을 코드에 반영할 수 없습니다.', 'error');
+      return;
+    }
+    addManualAction(entry, () => {
+      cancelSelectionWorkflow('현재 선택을 코드에 반영했습니다.', 'success');
+      updateCode();
+    });
+    selectionState.pendingAction = null;
+    selectionState.pendingAttribute = '';
     return;
   }
   if (actionType === 'get_attribute') {
@@ -1244,30 +1328,12 @@ function buildManualActionCode(action, frameworkLower, languageLower, indent) {
   return lines;
 }
 
-function appendManualActionsToCode(lines, manualList, frameworkLower, languageLower, indent) {
-  const list = Array.isArray(manualList) ? manualList.filter(Boolean) : [];
-  if (!list.length) return;
-  const comment = languageLower === 'python'
-    ? `${indent}# --- 사용자 지정 동작 ---`
-    : `${indent}// --- manual actions ---`;
-  if (lines.length && lines[lines.length - 1] !== '') {
-    lines.push('');
-  }
-  lines.push(comment);
-  list.forEach((action) => {
-    const actionLines = buildManualActionCode(action, frameworkLower, languageLower, indent);
-    if (actionLines.length) {
-      actionLines.forEach((line) => lines.push(line));
-    }
-  });
-}
-
 function buildSelectionPreviewLines(path, framework, language) {
   if (!Array.isArray(path) || !path.length) return [];
   const frameworkLower = (framework || '').toLowerCase();
   const languageLower = (language || '').toLowerCase();
   const indent = '';
-  const serial = 'preview';
+  const serial = manualActionSerial;
   if (frameworkLower === 'playwright') {
     return buildPlaywrightLocatorChain(path, languageLower, indent, serial).lines;
   }
@@ -1878,11 +1944,8 @@ function generateCode(events, manualList, framework, language) {
   const lines = [];
   const frameworkLower = (framework || '').toLowerCase();
   const languageLower = (language || '').toLowerCase();
-  const actions = (events || []).map(ev => ({
-    event: ev,
-    selectorInfo: selectSelectorForEvent(ev)
-  }));
   const manualActionsList = Array.isArray(manualList) ? manualList.filter(Boolean) : [];
+  const timeline = buildActionTimeline(events || [], manualActionsList);
   
   if (frameworkLower === 'playwright') {
     if (languageLower === 'python') {
@@ -1894,27 +1957,31 @@ function generateCode(events, manualList, framework, language) {
       let currentFrameContext = null;
       let frameLocatorIndex = 0;
       let currentBase = 'page';
-      actions.forEach(({event, selectorInfo}) => {
-        const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
-        if (!framesEqual(targetFrame, currentFrameContext)) {
-          if (targetFrame) {
-            frameLocatorIndex += 1;
-            const alias = `frame_locator_${frameLocatorIndex}`;
-            const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ');
-            setupLines.forEach(line => lines.push(`  ${line}`));
-            currentBase = alias;
-            currentFrameContext = targetFrame;
-          } else {
-            currentBase = 'page';
-            currentFrameContext = null;
+      timeline.forEach((entry) => {
+        if (entry.kind === 'event') {
+          const {event, selectorInfo} = entry;
+          const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
+          if (!framesEqual(targetFrame, currentFrameContext)) {
+            if (targetFrame) {
+              frameLocatorIndex += 1;
+              const alias = `frame_locator_${frameLocatorIndex}`;
+              const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ');
+              setupLines.forEach(line => lines.push(`  ${line}`));
+              currentBase = alias;
+              currentFrameContext = targetFrame;
+            } else {
+              currentBase = 'page';
+              currentFrameContext = null;
+            }
           }
-        }
-        const actionLine = buildPlaywrightPythonAction(event, selectorInfo, currentBase);
-        if (actionLine) {
-          lines.push(`  ${actionLine}`);
+          const actionLine = buildPlaywrightPythonAction(event, selectorInfo, currentBase);
+          if (actionLine) {
+            lines.push(`  ${actionLine}`);
+          }
+        } else if (entry.kind === 'manual') {
+          emitManualActionLines(lines, entry.action, frameworkLower, languageLower, '  ');
         }
       });
-      appendManualActionsToCode(lines, manualActionsList, frameworkLower, languageLower, '  ');
       lines.push("  browser.close()");
     } else if (languageLower === 'javascript') {
       lines.push("const { chromium } = require('playwright');");
@@ -1925,27 +1992,31 @@ function generateCode(events, manualList, framework, language) {
       let currentFrameContext = null;
       let frameLocatorIndex = 0;
       let currentBase = 'page';
-      actions.forEach(({event, selectorInfo}) => {
-        const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
-        if (!framesEqual(targetFrame, currentFrameContext)) {
-          if (targetFrame) {
-            frameLocatorIndex += 1;
-            const alias = `frameLocator${frameLocatorIndex}`;
-            const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ');
-            setupLines.forEach(line => lines.push(`  ${line}`));
-            currentBase = alias;
-            currentFrameContext = targetFrame;
-          } else {
-            currentBase = 'page';
-            currentFrameContext = null;
+      timeline.forEach((entry) => {
+        if (entry.kind === 'event') {
+          const {event, selectorInfo} = entry;
+          const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
+          if (!framesEqual(targetFrame, currentFrameContext)) {
+            if (targetFrame) {
+              frameLocatorIndex += 1;
+              const alias = `frameLocator${frameLocatorIndex}`;
+              const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ');
+              setupLines.forEach(line => lines.push(`  ${line}`));
+              currentBase = alias;
+              currentFrameContext = targetFrame;
+            } else {
+              currentBase = 'page';
+              currentFrameContext = null;
+            }
           }
-        }
-        const actionLine = buildPlaywrightJSAction(event, selectorInfo, currentBase);
-        if (actionLine) {
-          lines.push(`  ${actionLine}`);
+          const actionLine = buildPlaywrightJSAction(event, selectorInfo, currentBase);
+          if (actionLine) {
+            lines.push(`  ${actionLine}`);
+          }
+        } else if (entry.kind === 'manual') {
+          emitManualActionLines(lines, entry.action, frameworkLower, languageLower, '  ');
         }
       });
-      appendManualActionsToCode(lines, manualActionsList, frameworkLower, languageLower, '  ');
       lines.push("  await browser.close();");
       lines.push("})();");
     } else if (languageLower === 'typescript') {
@@ -1957,27 +2028,31 @@ function generateCode(events, manualList, framework, language) {
       let currentFrameContext = null;
       let frameLocatorIndex = 0;
       let currentBase = 'page';
-      actions.forEach(({event, selectorInfo}) => {
-        const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
-        if (!framesEqual(targetFrame, currentFrameContext)) {
-          if (targetFrame) {
-            frameLocatorIndex += 1;
-            const alias = `frameLocator${frameLocatorIndex}`;
-            const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ');
-            setupLines.forEach(line => lines.push(`  ${line}`));
-            currentBase = alias;
-            currentFrameContext = targetFrame;
-          } else {
-            currentBase = 'page';
-            currentFrameContext = null;
+      timeline.forEach((entry) => {
+        if (entry.kind === 'event') {
+          const {event, selectorInfo} = entry;
+          const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
+          if (!framesEqual(targetFrame, currentFrameContext)) {
+            if (targetFrame) {
+              frameLocatorIndex += 1;
+              const alias = `frameLocator${frameLocatorIndex}`;
+              const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ');
+              setupLines.forEach(line => lines.push(`  ${line}`));
+              currentBase = alias;
+              currentFrameContext = targetFrame;
+            } else {
+              currentBase = 'page';
+              currentFrameContext = null;
+            }
           }
-        }
-        const actionLine = buildPlaywrightJSAction(event, selectorInfo, currentBase);
-        if (actionLine) {
-          lines.push(`  ${actionLine}`);
+          const actionLine = buildPlaywrightJSAction(event, selectorInfo, currentBase);
+          if (actionLine) {
+            lines.push(`  ${actionLine}`);
+          }
+        } else if (entry.kind === 'manual') {
+          emitManualActionLines(lines, entry.action, frameworkLower, languageLower, '  ');
         }
       });
-      appendManualActionsToCode(lines, manualActionsList, frameworkLower, languageLower, '  ');
       lines.push("  await browser.close();");
       lines.push("})();");
     }
@@ -1989,24 +2064,28 @@ function generateCode(events, manualList, framework, language) {
       lines.push("driver = webdriver.Chrome()");
       lines.push("driver.get('REPLACE_URL')");
       let currentFrame = null;
-      actions.forEach(({event, selectorInfo}) => {
-        const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
-        if (targetFrame) {
-          const switchLine = buildSeleniumFrameSwitchPython(targetFrame);
-          if (switchLine) {
-            lines.push(switchLine);
-            currentFrame = targetFrame;
+      timeline.forEach((entry) => {
+        if (entry.kind === 'event') {
+          const {event, selectorInfo} = entry;
+          const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
+          if (targetFrame) {
+            const switchLine = buildSeleniumFrameSwitchPython(targetFrame);
+            if (switchLine) {
+              lines.push(switchLine);
+              currentFrame = targetFrame;
+            }
+          } else if (currentFrame) {
+            lines.push('driver.switch_to.default_content()');
+            currentFrame = null;
           }
-        } else if (currentFrame) {
-          lines.push('driver.switch_to.default_content()');
-          currentFrame = null;
-        }
-        const actionLine = buildSeleniumPythonAction(event, selectorInfo);
-        if (actionLine) {
-          lines.push(actionLine);
+          const actionLine = buildSeleniumPythonAction(event, selectorInfo);
+          if (actionLine) {
+            lines.push(actionLine);
+          }
+        } else if (entry.kind === 'manual') {
+          emitManualActionLines(lines, entry.action, frameworkLower, languageLower, '');
         }
       });
-      appendManualActionsToCode(lines, manualActionsList, frameworkLower, languageLower, '');
       lines.push("driver.quit()");
     } else if (languageLower === 'javascript') {
       lines.push("const { Builder, By } = require('selenium-webdriver');");
@@ -2019,24 +2098,28 @@ function generateCode(events, manualList, framework, language) {
       lines.push("    .build();");
       lines.push("  await driver.get('REPLACE_URL');");
       let currentFrame = null;
-      actions.forEach(({event, selectorInfo}) => {
-        const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
-        if (targetFrame) {
-          const switchLine = buildSeleniumFrameSwitchJS(targetFrame, '  ');
-          if (switchLine) {
-            lines.push(switchLine);
-            currentFrame = targetFrame;
+      timeline.forEach((entry) => {
+        if (entry.kind === 'event') {
+          const {event, selectorInfo} = entry;
+          const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
+          if (targetFrame) {
+            const switchLine = buildSeleniumFrameSwitchJS(targetFrame, '  ');
+            if (switchLine) {
+              lines.push(switchLine);
+              currentFrame = targetFrame;
+            }
+          } else if (currentFrame) {
+            lines.push('  await driver.switchTo().defaultContent();');
+            currentFrame = null;
           }
-        } else if (currentFrame) {
-          lines.push('  await driver.switchTo().defaultContent();');
-          currentFrame = null;
-        }
-        const actionLine = buildSeleniumJSAction(event, selectorInfo);
-        if (actionLine) {
-          lines.push(actionLine);
+          const actionLine = buildSeleniumJSAction(event, selectorInfo);
+          if (actionLine) {
+            lines.push(actionLine);
+          }
+        } else if (entry.kind === 'manual') {
+          emitManualActionLines(lines, entry.action, frameworkLower, languageLower, '  ');
         }
       });
-      appendManualActionsToCode(lines, manualActionsList, frameworkLower, languageLower, '  ');
       lines.push("  await driver.quit();");
       lines.push("})();");
     } else if (languageLower === 'typescript') {
@@ -2050,24 +2133,28 @@ function generateCode(events, manualList, framework, language) {
       lines.push("    .build();");
       lines.push("  await driver.get('REPLACE_URL');");
       let currentFrame = null;
-      actions.forEach(({event, selectorInfo}) => {
-        const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
-        if (targetFrame) {
-          const switchLine = buildSeleniumFrameSwitchTS(targetFrame);
-          if (switchLine) {
-            lines.push(switchLine);
-            currentFrame = targetFrame;
+      timeline.forEach((entry) => {
+        if (entry.kind === 'event') {
+          const {event, selectorInfo} = entry;
+          const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
+          if (targetFrame) {
+            const switchLine = buildSeleniumFrameSwitchTS(targetFrame);
+            if (switchLine) {
+              lines.push(switchLine);
+              currentFrame = targetFrame;
+            }
+          } else if (currentFrame) {
+            lines.push('  await driver.switchTo().defaultContent();');
+            currentFrame = null;
           }
-        } else if (currentFrame) {
-          lines.push('  await driver.switchTo().defaultContent();');
-          currentFrame = null;
-        }
-        const actionLine = buildSeleniumJSAction(event, selectorInfo);
-        if (actionLine) {
-          lines.push(actionLine);
+          const actionLine = buildSeleniumJSAction(event, selectorInfo);
+          if (actionLine) {
+            lines.push(actionLine);
+          }
+        } else if (entry.kind === 'manual') {
+          emitManualActionLines(lines, entry.action, frameworkLower, languageLower, '  ');
         }
       });
-      appendManualActionsToCode(lines, manualActionsList, frameworkLower, languageLower, '  ');
       lines.push("  await driver.quit();");
       lines.push("})();");
     }
