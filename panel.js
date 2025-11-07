@@ -357,14 +357,39 @@ function listenEvents() {
       div.style.padding = '4px 8px';
       div.style.margin = '2px 0';
       div.style.borderRadius = '4px';
+      const indexLabel = (msg.stepIndex !== undefined ? msg.stepIndex + 1 : msg.step || '?');
+      const totalLabel = msg.total || '?';
       if (msg.ok) {
         div.style.background = '#e8f5e9';
         div.style.color = '#2e7d32';
-        div.textContent = `[${(msg.stepIndex !== undefined ? msg.stepIndex + 1 : msg.step || '?')}/${msg.total || '?'}] ✓ OK - ${msg.used || ''} (${msg.selector || 'N/A'})`;
+        const detailParts = [];
+        if (msg.used) {
+          detailParts.push(msg.used);
+        }
+        if (msg.selector) {
+          detailParts.push(`(${msg.selector})`);
+        }
+        if (msg.manualActionType === 'extract_text' && msg.value !== undefined && msg.value !== null) {
+          detailParts.push(`text="${msg.value}"`);
+        }
+        if (msg.manualActionType === 'get_attribute') {
+          const attrLabel = msg.attributeName || 'attr';
+          detailParts.push(`${attrLabel}="${msg.value ?? ''}"`);
+        }
+        const detailText = detailParts.length ? ` - ${detailParts.join(' ')}` : '';
+        div.textContent = `[${indexLabel}/${totalLabel}] ✓ OK${detailText}`;
       } else {
         div.style.background = '#ffebee';
         div.style.color = '#c62828';
-        div.textContent = `[${(msg.stepIndex !== undefined ? msg.stepIndex + 1 : msg.step || '?')}/${msg.total || '?'}] ✗ FAIL - ${msg.reason || 'unknown error'}`;
+        const detailParts = [];
+        if (msg.manualActionType === 'get_attribute' && msg.attributeName) {
+          detailParts.push(`attr=${msg.attributeName}`);
+        }
+        if (msg.selector) {
+          detailParts.push(`selector=${msg.selector}`);
+        }
+        const detailText = detailParts.length ? ` (${detailParts.join(', ')})` : '';
+        div.textContent = `[${indexLabel}/${totalLabel}] ✗ FAIL - ${msg.reason || 'unknown error'}${detailText}`;
       }
       logEntries.appendChild(div);
       // 자동 스크롤
@@ -803,7 +828,8 @@ function buildSelectionPathArray() {
         xpathValue: candidate.xpathValue || null,
         relation: candidate.relation || null,
         reason: candidate.reason || '',
-        matchMode: candidate.matchMode || null
+        matchMode: candidate.matchMode || null,
+        iframeContext: (node.element && node.element.iframeContext) || null
       };
     })
     .filter(Boolean);
@@ -1014,7 +1040,8 @@ function buildManualActionEntry(actionType, path, options = {}) {
     serial,
     actionType,
     path,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    iframeContext: path[path.length - 1] && path[path.length - 1].iframeContext ? path[path.length - 1].iframeContext : null
   };
   if (actionType === 'extract_text') {
     entry.resultName = options.resultName || `text_result_${serial}`;
@@ -1097,6 +1124,80 @@ function buildActionTimeline(events, manualList) {
     return a.sequence - b.sequence;
   });
   return timeline;
+}
+
+function convertManualActionToEvent(action) {
+  if (!action || !Array.isArray(action.path) || !action.path.length) return null;
+  const path = action.path;
+  const selectors = path.map((item, idx) => {
+    if (!item || !item.selector) return null;
+    const type = item.type || inferSelectorType(item.selector);
+    const isTarget = idx === path.length - 1;
+    return {
+      selector: item.selector,
+      type,
+      textValue: item.textValue || null,
+      xpathValue: item.xpathValue || null,
+      matchMode: item.matchMode || null,
+      relation: item.relation || null,
+      score: isTarget ? 100 : Math.max(60, 85 - (path.length - 1 - idx) * 5),
+      reason: item.reason || ''
+    };
+  }).filter(Boolean);
+
+  if (!selectors.length) return null;
+
+  const targetEntry = selectors[selectors.length - 1];
+  const eventBase = {
+    action: 'click',
+    selectorCandidates: selectors,
+    primarySelector: targetEntry.selector,
+    primarySelectorType: targetEntry.type,
+    primarySelectorText: targetEntry.textValue || null,
+    primarySelectorXPath: targetEntry.xpathValue || (targetEntry.type === 'xpath' ? getSelectorCore(targetEntry.selector) : null),
+    primarySelectorMatchMode: targetEntry.matchMode || null,
+    iframeContext: action.iframeContext || null,
+    timestamp: action.createdAt || Date.now(),
+    manual: true,
+    manualActionId: action.id || null,
+    manualActionType: action.actionType || null
+  };
+
+  if (action.actionType === 'click') {
+    return eventBase;
+  }
+  if (action.actionType === 'extract_text') {
+    return {
+      ...eventBase,
+      action: 'manual_extract_text',
+      manualResultName: action.resultName || null
+    };
+  }
+  if (action.actionType === 'get_attribute') {
+    return {
+      ...eventBase,
+      action: 'manual_get_attribute',
+      manualResultName: action.resultName || null,
+      manualAttribute: action.attributeName || ''
+    };
+  }
+  return null;
+}
+
+function buildReplayQueue(events, manualList) {
+  const timeline = buildActionTimeline(events, manualList);
+  const queue = [];
+  timeline.forEach((entry) => {
+    if (entry.kind === 'event' && entry.event) {
+      queue.push(entry.event);
+    } else if (entry.kind === 'manual' && entry.action) {
+      const manualEvent = convertManualActionToEvent(entry.action);
+      if (manualEvent) {
+        queue.push(manualEvent);
+      }
+    }
+  });
+  return queue;
 }
 
 function applySelectionAction(actionType, options = {}) {
@@ -1533,7 +1634,11 @@ function startReplay() {
   }
   chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
     const events = res && res.events || [];
-    if (events.length === 0) {
+    chrome.storage.local.get({manualActions: []}, (data) => {
+      const manualListRaw = Array.isArray(data.manualActions) ? data.manualActions : [];
+      const manualList = manualListRaw.filter(Boolean);
+      const replayQueue = buildReplayQueue(events, manualList);
+      if (replayQueue.length === 0) {
       alert('재생할 이벤트가 없습니다.');
       return;
     }
@@ -1541,7 +1646,7 @@ function startReplay() {
     // 로그 초기화
     logEntries.innerHTML = '';
     const startMsg = document.createElement('div');
-    startMsg.textContent = `리플레이 시작: ${events.length}개 이벤트`;
+      startMsg.textContent = `리플레이 시작: ${replayQueue.length}개 스텝`;
     startMsg.style.color = '#2196f3';
     startMsg.style.fontWeight = 'bold';
     logEntries.appendChild(startMsg);
@@ -1553,24 +1658,25 @@ function startReplay() {
         return;
       }
       
-      ensureReplayTabListener();
-      listenEvents();
-      replayState.running = true;
-      replayState.events = events;
-      replayState.index = 0;
-      replayState.tabId = tabs[0].id;
-      replayState.pending = false;
-      replayState.awaitingNavigation = false;
-      replayState.awaitingContent = false;
-      if (replayState.navigationGuard) {
-        clearTimeout(replayState.navigationGuard);
-        replayState.navigationGuard = null;
-      }
-      if (replayState.scheduledTimer) {
-        clearTimeout(replayState.scheduledTimer);
-        replayState.scheduledTimer = null;
-      }
-      sendReplayStep();
+        ensureReplayTabListener();
+        listenEvents();
+        replayState.running = true;
+        replayState.events = replayQueue;
+        replayState.index = 0;
+        replayState.tabId = tabs[0].id;
+        replayState.pending = false;
+        replayState.awaitingNavigation = false;
+        replayState.awaitingContent = false;
+        if (replayState.navigationGuard) {
+          clearTimeout(replayState.navigationGuard);
+          replayState.navigationGuard = null;
+        }
+        if (replayState.scheduledTimer) {
+          clearTimeout(replayState.scheduledTimer);
+          replayState.scheduledTimer = null;
+        }
+        sendReplayStep();
+      });
     });
   });
 }

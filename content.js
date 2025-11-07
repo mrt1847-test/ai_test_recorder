@@ -251,7 +251,16 @@
     }
   }
 
-  function countMatchesForSelector(parsed, root) {
+  function buildTextXPathExpression(text, matchMode, scopeIsDocument) {
+    const literal = escapeXPathLiteral(text);
+    const base = scopeIsDocument ? '//' : './/';
+    if (matchMode === 'exact') {
+      return `${base}*[normalize-space(.) = ${literal}]`;
+    }
+    return `${base}*[contains(normalize-space(.), ${literal})]`;
+  }
+
+  function countMatchesForSelector(parsed, root, options = {}) {
     if (!parsed || !parsed.value) return 0;
     const scope = root || document;
     try {
@@ -270,13 +279,18 @@
       if (parsed.type === 'text') {
         const targetText = normalizeText(parsed.value);
         if (!targetText) return 0;
+        const doc = scope.ownerDocument || document;
+        const contextNode = scope.nodeType ? scope : doc;
+        const isDocumentScope = !scope || scope === document || scope.nodeType === 9;
+        const matchMode = options.matchMode === 'contains' ? 'contains' : 'exact';
+        const expression = buildTextXPathExpression(targetText, matchMode, isDocumentScope);
+        const iterator = doc.evaluate(expression, contextNode, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
         let count = 0;
-        iterateElements(scope, el => {
-          const txt = normalizeText(el.innerText || el.textContent || '');
-          if (txt && txt.includes(targetText)) {
-            count += 1;
-          }
-        });
+        let node = iterator.iterateNext();
+        while (node) {
+          count += 1;
+          node = iterator.iterateNext();
+        }
         return count;
       }
       // CSS 계열
@@ -296,11 +310,12 @@
   function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
     if (!baseCandidate || !baseCandidate.selector) return null;
     const candidate = {...baseCandidate};
+    const originalType = candidate.type || inferSelectorType(candidate.selector);
     const parsed = parseSelectorForMatching(candidate.selector, candidate.type);
     const reasonParts = candidate.reason ? [candidate.reason] : [];
 
     if (!options.skipGlobalCheck) {
-      const globalCount = countMatchesForSelector(parsed, document);
+      const globalCount = countMatchesForSelector(parsed, document, {matchMode: candidate.matchMode});
       candidate.matchCount = globalCount;
       candidate.unique = globalCount === 1;
       if (globalCount === 0 && options.allowZero !== true) {
@@ -314,7 +329,7 @@
     }
 
     if (options.contextElement) {
-      const contextCount = countMatchesForSelector(parsed, options.contextElement);
+      const contextCount = countMatchesForSelector(parsed, options.contextElement, {matchMode: candidate.matchMode});
       candidate.contextMatchCount = contextCount;
       candidate.uniqueInContext = contextCount === 1;
       if (options.contextLabel) {
@@ -347,12 +362,12 @@
       candidate.score = Math.min(candidate.score, options.duplicateScore ?? 60);
     }
 
-    if (!candidate.unique && options.element && options.enableIndexing !== false) {
+    if (originalType !== 'text' && originalType !== 'xpath' && !candidate.unique && options.element && options.enableIndexing !== false) {
       const contextEl = options.contextElement && candidate.relation === 'relative' ? options.contextElement : null;
       const uniqueSelector = buildUniqueCssPath(options.element, contextEl);
       if (uniqueSelector && uniqueSelector !== candidate.selector) {
         const uniqueParsed = parseSelectorForMatching(uniqueSelector, 'css');
-        const count = countMatchesForSelector(uniqueParsed, contextEl || document);
+        const count = countMatchesForSelector(uniqueParsed, contextEl || document, {matchMode: candidate.matchMode});
         if (count === 1) {
           candidate.selector = uniqueSelector;
           candidate.type = 'css';
@@ -371,46 +386,60 @@
 
   function getSelectorCandidates(el) {
     if (!el) return [];
-    const c = [];
+    const results = [];
+    const seen = new Set();
+
+    function pushCandidate(candidate) {
+      if (!candidate || !candidate.selector) return;
+      const type = candidate.type || inferSelectorType(candidate.selector);
+      const key = `${type || ''}::${candidate.selector}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      results.push(candidate);
+    }
+
     try {
       if (el.id) {
         const idCandidate = enrichCandidateWithUniqueness({type:'id', selector:'#'+el.id, score:90, reason:'id 속성'}, {duplicateScore:60, element: el});
-        if (idCandidate) c.push(idCandidate);
+        pushCandidate(idCandidate);
       }
       if (el.dataset && el.dataset.testid) {
         const testIdCandidate = enrichCandidateWithUniqueness({type:'data-testid', selector:'[data-testid="'+el.dataset.testid+'"]', score:85, reason:'data-testid 속성'}, {duplicateScore:70, element: el});
-        if (testIdCandidate) c.push(testIdCandidate);
+        pushCandidate(testIdCandidate);
       }
       const name = el.getAttribute && el.getAttribute('name');
       if (name) {
         const nameCandidate = enrichCandidateWithUniqueness({type:'name', selector:'[name="'+name+'"]', score:80, reason:'name 속성'}, {duplicateScore:65, element: el});
-        if (nameCandidate) c.push(nameCandidate);
+        pushCandidate(nameCandidate);
       }
     } catch(e){}
     if (el.classList && el.classList.length) {
       const cls = Array.from(el.classList).slice(0,3).join('.');
       const classCandidate = enrichCandidateWithUniqueness({type:'class', selector:'.'+cls, score:60, reason:'class 조합'}, {duplicateScore:55, element: el});
-      if (classCandidate) c.push(classCandidate);
+      pushCandidate(classCandidate);
     }
     const rawText = (el.innerText||el.textContent||'').trim().split('\n').map(t => t.trim()).filter(Boolean)[0];
     if (rawText) {
       const truncatedText = rawText.slice(0, 60);
       const textCandidate = enrichCandidateWithUniqueness({type:'text', selector:'text="'+escapeAttributeValue(truncatedText)+'"', score:65, reason:'텍스트 일치', textValue: truncatedText}, {duplicateScore:55, element: el});
-      if (textCandidate) c.push(textCandidate);
+      if (textCandidate) {
+        textCandidate.matchMode = textCandidate.matchMode || 'exact';
+        pushCandidate(textCandidate);
+      }
     }
     const robustXPath = buildRobustXPath(el);
     if (robustXPath) {
       const robustCandidate = enrichCandidateWithUniqueness({type:'xpath', selector:'xpath='+robustXPath, score:60, reason:'속성 기반 XPath', xpathValue: robustXPath}, {duplicateScore:55, element: el});
-      if (robustCandidate) c.push(robustCandidate);
+      pushCandidate(robustCandidate);
     }
     const fullXPath = buildFullXPath(el);
     if (fullXPath) {
       const fullCandidate = enrichCandidateWithUniqueness({type:'xpath', selector:'xpath='+fullXPath, score:45, reason:'Full XPath (절대 경로)', xpathValue: fullXPath}, {duplicateScore:40, element: el, enableIndexing: false});
-      if (fullCandidate) c.push(fullCandidate);
+      pushCandidate(fullCandidate);
     }
     const tagCandidate = enrichCandidateWithUniqueness({type:'tag', selector:el.tagName.toLowerCase(), score:20, reason:'태그 이름'}, {duplicateScore:30, allowZero:true, element: el});
-    if (tagCandidate) c.push(tagCandidate);
-    return c.filter(Boolean);
+    pushCandidate(tagCandidate);
+    return results;
   }
 
   function getIframeContext(target) {
@@ -1048,7 +1077,8 @@
             tag: target.tagName,
             text: (target.innerText || target.textContent || '').trim().slice(0, 80),
             id: target.id || null,
-            classList: Array.from(target.classList || [])
+            classList: Array.from(target.classList || []),
+            iframeContext: getIframeContext(target)
           }
         });
         elementSelectionState.parentElement = target;
@@ -1649,6 +1679,9 @@
           const originalOutlineOffset = element.style.outlineOffset;
           let success = false;
           let failureReason = '';
+          let extractedValue;
+          let manualActionType = ev && ev.manualActionType ? ev.manualActionType : null;
+          let manualAttributeName = ev && ev.manualAttribute ? ev.manualAttribute : null;
 
           try {
             element.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1686,6 +1719,16 @@
               }
               element.dispatchEvent(new Event('input', { bubbles: true }));
               element.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (ev.action === 'manual_extract_text') {
+              extractedValue = element.innerText || element.textContent || '';
+              manualActionType = 'extract_text';
+            } else if (ev.action === 'manual_get_attribute') {
+              const attrName = manualAttributeName || ev.manualAttribute || ev.attributeName || '';
+              manualAttributeName = attrName;
+              extractedValue = attrName ? element.getAttribute(attrName) : null;
+              manualActionType = 'get_attribute';
+            } else {
+              throw new Error('unsupported action');
             }
 
             success = true;
@@ -1711,12 +1754,17 @@
             stepIndex: index,
             total,
             navigation: navigationTriggered,
-            ev
+            ev,
+            manualActionType: manualActionType || undefined,
+            manualActionId: ev && ev.manualActionId ? ev.manualActionId : undefined,
+            value: extractedValue,
+            attributeName: manualAttributeName || undefined,
+            resultName: ev && ev.manualResultName ? ev.manualResultName : undefined
           };
           chrome.runtime.sendMessage(payload);
 
           if (success) {
-            sendResponse({ok:true, navigation: navigationTriggered});
+            sendResponse({ok:true, navigation: navigationTriggered, value: extractedValue});
           } else {
             sendResponse({ok:false, reason: failureReason});
           }
