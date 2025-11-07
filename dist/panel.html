@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="toolbar">
+    <div class="toolbar-inner">
+      <div class="toolbar-row">
+        <label class="toolbar-field" for="test-purpose">
+          <span class="toolbar-label">테스트 케이스</span>
+          <textarea id="test-purpose" placeholder="테스트 케이스를 입력하세요" rows="3"></textarea>
+        </label>
+      </div>
+      <div class="toolbar-row">
+        <label class="toolbar-field" for="test-url">
+          <span class="toolbar-label">테스트 URL (선택)</span>
+          <input id="test-url" placeholder="https://example.com"/>
+        </label>
+      </div>
+      <div class="toolbar-row selects" role="group" aria-label="환경 설정">
+        <label class="toolbar-field" for="framework-select">
+          <span class="toolbar-label">자동화 프레임워크</span>
+          <select id="framework-select">
+            <option value="playwright">Playwright</option>
+            <option value="selenium">Selenium</option>
+          </select>
+        </label>
+        <label class="toolbar-field" for="language-select">
+          <span class="toolbar-label">언어</span>
+          <select id="language-select">
+            <option value="python">Python</option>
+            <option value="javascript">JavaScript</option>
+            <option value="typescript">TypeScript</option>
+          </select>
+        </label>
+      </div>
+      <div class="toolbar-row buttons" role="group" aria-label="녹화 및 편집 작업">
+        <button id="start-record" class="toolbar-btn">Record Start</button>
+        <button id="stop-record" class="toolbar-btn" disabled>Stop</button>
+        <button id="replay-btn" class="toolbar-btn">Replay</button>
+        <button id="element-select-btn" class="toolbar-btn">요소 선택</button>
+        <button id="reset-btn" class="toolbar-btn">초기화</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="left">
+      <h4>Timeline</h4>
+      <div id="timeline"></div>
+    </div>
+    <div id="right">
+      <div id="iframe-banner" class="hidden">⚠️ 이 요소는 iframe 내부에 있습니다. 자동 전환 필요</div>
+      <div id="selector-panel"><h4>추천 셀렉터</h4><div id="selector-list"></div></div>
+      <div id="element-panel" class="hidden">
+        <div class="element-header">
+          <h4>요소 선택 흐름</h4>
+          <button id="element-cancel-btn">취소</button>
+        </div>
+        <div id="element-status"></div>
+        <div id="element-path" class="element-section hidden">
+          <div class="element-title">선택 경로</div>
+          <div id="element-path-items"></div>
+        </div>
+        <div id="element-candidates" class="element-section"></div>
+        <div id="element-actions" class="element-section hidden">
+          <div class="element-title">동작 선택</div>
+          <div class="element-action-buttons">
+            <button data-action="click">클릭 이벤트 추가</button>
+            <button data-action="text">텍스트 가져오기</button>
+            <button data-action="value">값(value) 가져오기</button>
+            <button data-action="attribute">속성 가져오기</button>
+            <button data-action="child">하위 노드 선택</button>
+            <button data-action="parent">상위 노드로 이동</button>
+            <button data-action="commit">선택 완료</button>
+            <button data-action="finish">선택 취소</button>
+          </div>
+        </div>
+        <div id="element-attribute-panel" class="element-section hidden">
+          <div class="element-title">속성 추출</div>
+          <div class="element-attr-row">
+            <input id="element-attr-name" placeholder="속성명 (예: href)" />
+            <button id="element-attr-apply">적용</button>
+          </div>
+        </div>
+        <div id="element-code-preview" class="element-section hidden">
+          <div class="element-title">현재 코드 미리보기</div>
+          <pre><code id="element-code"></code></pre>
+        </div>
+      </div>
+      <div id="code-area"><h4>Code Preview</h4><textarea id="code-output" class="code-output" spellcheck="false"></textarea></div>
+      <div id="replay-log"><h4>Replay Log</h4><div id="log-entries"></div></div>
+    </div>
+  </div>
+
+<script src="panel.js"></script>
+</body>
+</html>

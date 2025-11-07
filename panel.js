@@ -42,6 +42,34 @@ const STEP_DELAY_MS = 150;
 const NAVIGATION_RECOVERY_DELAY_MS = 800;
 const DOM_COMPLETE_DELAY_MS = 250;
 const MAX_NAVIGATION_WAIT_MS = 15000;
+const EVENT_SCHEMA_VERSION = 2;
+
+function normalizeEventRecord(event) {
+  if (!event || typeof event !== 'object') return event;
+  if (!event.version) {
+    event.version = 1;
+  }
+  if (!event.metadata) {
+    event.metadata = { schemaVersion: event.version };
+  } else if (event.metadata.schemaVersion === undefined) {
+    event.metadata.schemaVersion = event.version;
+  }
+  if (event.page === undefined) {
+    event.page = null;
+  }
+  if (event.frame === undefined && event.iframeContext) {
+    event.frame = { iframeContext: event.iframeContext };
+  }
+  if (event.manual === true) {
+    event.manual = {
+      id: event.manualActionId || null,
+      type: event.manualActionType || null,
+      resultName: event.manualResultName || null,
+      attributeName: event.manualAttribute || null
+    };
+  }
+  return event;
+}
 
 function normalizeRequestedUrl(raw) {
   if (!raw || typeof raw !== 'string') return '';
@@ -295,7 +323,7 @@ if (elementAttrNameInput) {
 
 function loadTimeline() {
   chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
-    allEvents = res && res.events || [];
+    allEvents = (res && res.events || []).map((ev) => normalizeEventRecord(ev));
     timeline.innerHTML = '';
     allEvents.forEach((ev, index) => {
       appendTimelineItem(ev, index);
@@ -322,9 +350,10 @@ function listenEvents() {
       return handledAsync;
     }
     if (msg.type === 'EVENT_RECORDED') {
-      allEvents.push(msg.event);
+      const normalizedEvent = normalizeEventRecord(msg.event);
+      allEvents.push(normalizedEvent);
       const index = allEvents.length - 1;
-      appendTimelineItem(msg.event, index);
+      appendTimelineItem(normalizedEvent, index);
       // 자동으로 마지막 이벤트 선택
       currentEventIndex = index;
       document.querySelectorAll('.timeline-item').forEach(item => item.classList.remove('selected'));
@@ -332,8 +361,8 @@ function listenEvents() {
       if (lastItem) {
         lastItem.classList.add('selected');
       }
-      showSelectors(msg.event.selectorCandidates || [], msg.event, index);
-      showIframe(msg.event.iframeContext);
+      showSelectors(normalizedEvent.selectorCandidates || [], normalizedEvent, index);
+      showIframe(normalizedEvent.iframeContext);
       // 실시간 코드 업데이트
       updateCode();
     }
@@ -1088,8 +1117,9 @@ function buildActionTimeline(events, manualList) {
   let sequence = 0;
   let maxEventTimestamp = 0;
   if (Array.isArray(events)) {
-    events.forEach((event, index) => {
-      const timestamp = typeof event.timestamp === 'number' ? event.timestamp : 0;
+    events.forEach((event) => {
+      const normalizedEvent = normalizeEventRecord(event);
+      const timestamp = typeof normalizedEvent.timestamp === 'number' ? normalizedEvent.timestamp : 0;
       if (timestamp > maxEventTimestamp) {
         maxEventTimestamp = timestamp;
       }
@@ -1097,8 +1127,8 @@ function buildActionTimeline(events, manualList) {
         kind: 'event',
         time: timestamp,
         sequence: sequence++,
-        event,
-        selectorInfo: selectSelectorForEvent(event)
+        event: normalizedEvent,
+        selectorInfo: selectSelectorForEvent(normalizedEvent)
       });
     });
   }
@@ -1147,41 +1177,62 @@ function convertManualActionToEvent(action) {
 
   if (!selectors.length) return null;
 
-  const targetEntry = selectors[selectors.length - 1];
-  const eventBase = {
-    action: 'click',
-    selectorCandidates: selectors,
-    primarySelector: targetEntry.selector,
-    primarySelectorType: targetEntry.type,
-    primarySelectorText: targetEntry.textValue || null,
-    primarySelectorXPath: targetEntry.xpathValue || (targetEntry.type === 'xpath' ? getSelectorCore(targetEntry.selector) : null),
-    primarySelectorMatchMode: targetEntry.matchMode || null,
-    iframeContext: action.iframeContext || null,
-    timestamp: action.createdAt || Date.now(),
-    manual: true,
-    manualActionId: action.id || null,
-    manualActionType: action.actionType || null
+  let actionName = 'click';
+  if (action.actionType === 'extract_text') {
+    actionName = 'manual_extract_text';
+  } else if (action.actionType === 'get_attribute') {
+    actionName = 'manual_get_attribute';
+  } else if (action.actionType !== 'click') {
+    return null;
+  }
+
+  const manualEvent = createManualEventRecord(action, selectors, actionName);
+  return manualEvent;
+}
+
+function createManualEventRecord(action, selectorsList, actionName) {
+  if (!selectorsList.length) return null;
+  const timestamp = action.createdAt || Date.now();
+  const targetEntry = selectorsList[selectorsList.length - 1];
+  const primaryType = targetEntry.type || inferSelectorType(targetEntry.selector);
+  const frameContext = action.iframeContext || null;
+  const manualPayload = {
+    id: action.id || null,
+    type: action.actionType || null,
+    path: action.path || [],
+    resultName: action.resultName || null,
+    attributeName: action.attributeName || null,
+    createdAt: timestamp
   };
 
-  if (action.actionType === 'click') {
-    return eventBase;
-  }
-  if (action.actionType === 'extract_text') {
-    return {
-      ...eventBase,
-      action: 'manual_extract_text',
-      manualResultName: action.resultName || null
-    };
-  }
-  if (action.actionType === 'get_attribute') {
-    return {
-      ...eventBase,
-      action: 'manual_get_attribute',
-      manualResultName: action.resultName || null,
-      manualAttribute: action.attributeName || ''
-    };
-  }
-  return null;
+  const eventRecord = {
+    version: EVENT_SCHEMA_VERSION,
+    timestamp,
+    action: actionName,
+    value: null,
+    selectorCandidates: selectorsList,
+    primarySelector: targetEntry.selector,
+    primarySelectorType: primaryType,
+    primarySelectorText: targetEntry.textValue || null,
+    primarySelectorXPath: targetEntry.xpathValue || (primaryType === 'xpath' ? getSelectorCore(targetEntry.selector) : null),
+    primarySelectorMatchMode: targetEntry.matchMode || null,
+    iframeContext: frameContext,
+    page: null,
+    frame: frameContext ? { iframeContext: frameContext } : null,
+    target: null,
+    clientRect: null,
+    metadata: {
+      schemaVersion: EVENT_SCHEMA_VERSION,
+      source: 'manual_action'
+    },
+    manual: manualPayload,
+    manualActionType: action.actionType || null,
+    manualActionId: action.id || null,
+    manualResultName: action.resultName || null,
+    manualAttribute: action.attributeName || null
+  };
+
+  return normalizeEventRecord(eventRecord);
 }
 
 function buildReplayQueue(events, manualList) {
@@ -1638,30 +1689,31 @@ function startReplay() {
       const manualListRaw = Array.isArray(data.manualActions) ? data.manualActions : [];
       const manualList = manualListRaw.filter(Boolean);
       const replayQueue = buildReplayQueue(events, manualList);
-      if (replayQueue.length === 0) {
-      alert('재생할 이벤트가 없습니다.');
-      return;
-    }
-    
-    // 로그 초기화
-    logEntries.innerHTML = '';
-    const startMsg = document.createElement('div');
-      startMsg.textContent = `리플레이 시작: ${replayQueue.length}개 스텝`;
-    startMsg.style.color = '#2196f3';
-    startMsg.style.fontWeight = 'bold';
-    logEntries.appendChild(startMsg);
-    
-    // 현재 활성 탭 찾기
-    chrome.tabs.query({active:true, currentWindow:true}, (tabs) => {
-      if (!tabs[0]) {
-        alert('활성 탭을 찾을 수 없습니다.');
+      const normalizedQueue = replayQueue.map((item) => normalizeEventRecord(item));
+      if (normalizedQueue.length === 0) {
+        alert('재생할 이벤트가 없습니다.');
         return;
       }
       
+      // 로그 초기화
+      logEntries.innerHTML = '';
+      const startMsg = document.createElement('div');
+      startMsg.textContent = `리플레이 시작: ${normalizedQueue.length}개 스텝`;
+      startMsg.style.color = '#2196f3';
+      startMsg.style.fontWeight = 'bold';
+      logEntries.appendChild(startMsg);
+      
+      // 현재 활성 탭 찾기
+      chrome.tabs.query({active:true, currentWindow:true}, (tabs) => {
+        if (!tabs[0]) {
+          alert('활성 탭을 찾을 수 없습니다.');
+          return;
+        }
+
         ensureReplayTabListener();
         listenEvents();
         replayState.running = true;
-        replayState.events = replayQueue;
+        replayState.events = normalizedQueue;
         replayState.index = 0;
         replayState.tabId = tabs[0].id;
         replayState.pending = false;
@@ -1683,7 +1735,7 @@ function startReplay() {
 
 function updateCode() {
   chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
-    const events = res && res.events || [];
+    const events = (res && res.events || []).map((ev) => normalizeEventRecord(ev));
     allEvents = events;
     loadManualActions(() => {
       const code = generateCode(events, manualActions, selectedFramework, selectedLanguage);

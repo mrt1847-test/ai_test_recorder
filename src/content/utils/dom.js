@@ -1,0 +1,318 @@
+export function escapeAttributeValue(value) {
+  return (value || '').replace(/"/g, '\\"').replace(/\u0008/g, '').replace(/\u000c/g, '').trim();
+}
+
+export function cssEscapeIdent(value) {
+  if (typeof value !== 'string') return '';
+  if (window.CSS && typeof window.CSS.escape === 'function') {
+    return window.CSS.escape(value);
+  }
+  return value.replace(/([!"#$%&'()*+,./:;<=>?@\[\]^`{|}~])/g, '\\$1');
+}
+
+export function buildFullXPath(el) {
+  if (!el || el.nodeType !== 1) return null;
+  if (el.id) {
+    const cleanedId = escapeAttributeValue(el.id);
+    if (cleanedId) {
+      return `//*[@id="${cleanedId}"]`;
+    }
+  }
+  const parts = [];
+  let current = el;
+  while (current && current.nodeType === 1 && current !== document.documentElement) {
+    const tagName = current.tagName.toLowerCase();
+    let index = 1;
+    let sibling = current.previousSibling;
+    while (sibling) {
+      if (sibling.nodeType === 1 && sibling.tagName === current.tagName) {
+        index += 1;
+      }
+      sibling = sibling.previousSibling;
+    }
+    parts.unshift(`${tagName}[${index}]`);
+    current = current.parentNode;
+  }
+  if (parts.length === 0) return null;
+  return `//${parts.join('/')}`;
+}
+
+export function buildCssSegment(el) {
+  if (!el || el.nodeType !== 1) return '';
+  const tag = el.tagName.toLowerCase();
+  if (el.id) {
+    return `${tag}#${cssEscapeIdent(el.id)}`;
+  }
+  const classList = Array.from(el.classList || []).slice(0, 2).map(cssEscapeIdent).filter(Boolean);
+  if (classList.length) {
+    return `${tag}.${classList.join('.')}`;
+  }
+  let index = 1;
+  let sibling = el.previousElementSibling;
+  while (sibling) {
+    if (sibling.tagName === el.tagName) {
+      index += 1;
+    }
+    sibling = sibling.previousElementSibling;
+  }
+  return `${tag}:nth-of-type(${index})`;
+}
+
+export function buildRelativeCssSelector(parent, child) {
+  if (!parent || !child || !parent.contains(child) || parent === child) return null;
+  const segments = [];
+  let current = child;
+  while (current && current !== parent) {
+    if (current.nodeType !== 1) {
+      current = current.parentElement;
+      continue;
+    }
+    const segment = buildCssSegment(current);
+    if (!segment) return null;
+    segments.unshift(segment);
+    current = current.parentElement;
+  }
+  if (current !== parent) return null;
+  return `:scope ${segments.join(' > ')}`;
+}
+
+export function buildUniqueCssPath(element, contextElement) {
+  if (!element || element.nodeType !== 1) return null;
+  const segments = [];
+  let current = element;
+  while (current && current.nodeType === 1 && current !== contextElement) {
+    const segment = buildCssSegment(current);
+    if (!segment) return null;
+    segments.unshift(segment);
+    const cssPath = segments.join(' > ');
+    const selectorString = contextElement ? `:scope ${cssPath}` : cssPath;
+    const parsed = parseSelectorForMatching(`css=${selectorString}`, 'css');
+    const targetScope = contextElement || document;
+    if (countMatchesForSelector(parsed, targetScope) === 1) {
+      if (!contextElement && cssPath.startsWith('html:nth-of-type(1) > ')) {
+        return cssPath.replace(/^html:nth-of-type\(1\)\s*>\s*/, '');
+      }
+      return contextElement ? `:scope ${cssPath}` : cssPath;
+    }
+    current = current.parentElement;
+    if (!current) break;
+    if (!contextElement && current === document.documentElement) {
+      break;
+    }
+  }
+  if (contextElement) {
+    const relativePath = segments.join(' > ');
+    return relativePath ? `:scope ${relativePath}` : null;
+  }
+  let finalPath = segments.join(' > ');
+  if (finalPath.startsWith('html:nth-of-type(1) > ')) {
+    finalPath = finalPath.replace(/^html:nth-of-type\(1\)\s*>\s*/, '');
+  }
+  return finalPath;
+}
+
+export function escapeXPathLiteral(value) {
+  if (value.includes('"') && value.includes("'")) {
+    const parts = value.split('"').map((part) => `"${part}"`).join(', "\"", ');
+    return `concat(${parts})`;
+  }
+  if (value.includes('"')) {
+    return `'${value}'`;
+  }
+  return `"${value}"`;
+}
+
+export function buildXPathSegment(el) {
+  if (!el || el.nodeType !== 1) return '';
+  const tag = el.tagName.toLowerCase();
+  if (el.id) {
+    return `${tag}[@id=${escapeXPathLiteral(el.id)}]`;
+  }
+  const nameAttr = el.getAttribute && el.getAttribute('name');
+  if (nameAttr) {
+    return `${tag}[@name=${escapeXPathLiteral(nameAttr)}]`;
+  }
+  let index = 1;
+  let sibling = el.previousElementSibling;
+  while (sibling) {
+    if (sibling.tagName === el.tagName) {
+      index += 1;
+    }
+    sibling = sibling.previousElementSibling;
+  }
+  return `${tag}[${index}]`;
+}
+
+export function buildRelativeXPathSelector(parent, child) {
+  if (!parent || !child || !parent.contains(child) || parent === child) return null;
+  const segments = [];
+  let current = child;
+  while (current && current !== parent) {
+    if (current.nodeType !== 1) {
+      current = current.parentElement;
+      continue;
+    }
+    const segment = buildXPathSegment(current);
+    if (!segment) return null;
+    segments.unshift(segment);
+    current = current.parentElement;
+  }
+  if (current !== parent) return null;
+  return `.//${segments.join('/')}`;
+}
+
+export function buildRobustXPathSegment(el) {
+  if (!el || el.nodeType !== 1) return null;
+  const tag = el.tagName.toLowerCase();
+  if (el.id) {
+    return { segment: `//*[@id=${escapeXPathLiteral(el.id)}]`, stop: true };
+  }
+  const attrPriority = ['data-testid', 'data-test', 'data-qa', 'data-cy', 'data-id', 'aria-label', 'role', 'name', 'type'];
+  for (const attr of attrPriority) {
+    const val = el.getAttribute && el.getAttribute(attr);
+    if (val) {
+      return { segment: `${tag}[@${attr}=${escapeXPathLiteral(val)}]`, stop: false };
+    }
+  }
+  const classList = Array.from(el.classList || []).filter(Boolean);
+  if (classList.length) {
+    const cls = classList[0];
+    const containsExpr = `contains(concat(' ', normalize-space(@class), ' '), ${escapeXPathLiteral(' ' + cls + ' ')})`;
+    return { segment: `${tag}[${containsExpr}]`, stop: false };
+  }
+  let index = 1;
+  let sibling = el.previousElementSibling;
+  while (sibling) {
+    if (sibling.tagName === el.tagName) {
+      index += 1;
+    }
+    sibling = sibling.previousElementSibling;
+  }
+  return { segment: `${tag}[${index}]`, stop: false };
+}
+
+export function buildRobustXPath(el) {
+  if (!el || el.nodeType !== 1) return null;
+  const segments = [];
+  let current = el;
+  while (current && current.nodeType === 1) {
+    const info = buildRobustXPathSegment(current);
+    if (!info || !info.segment) return null;
+    segments.unshift(info.segment);
+    if (info.stop) break;
+    current = current.parentElement;
+  }
+  if (segments.length === 0) return null;
+  let xpath = segments[0];
+  if (xpath.startsWith('//*[@')) {
+    if (segments.length > 1) {
+      xpath += `/${segments.slice(1).join('/')}`;
+    }
+  } else {
+    xpath = `//${segments.join('/')}`;
+  }
+  return xpath;
+}
+
+export function normalizeText(text) {
+  return (text || '').replace(/\s+/g, ' ').trim();
+}
+
+export function inferSelectorType(selector) {
+  if (!selector || typeof selector !== 'string') return null;
+  const trimmed = selector.trim();
+  if (trimmed.startsWith('xpath=')) return 'xpath';
+  if (trimmed.startsWith('//') || trimmed.startsWith('(')) return 'xpath';
+  if (trimmed.startsWith('text=')) return 'text';
+  if (trimmed.startsWith('#') || trimmed.startsWith('.') || trimmed.startsWith('[')) return 'css';
+  return 'css';
+}
+
+export function parseSelectorForMatching(selector, explicitType) {
+  if (!selector) return { type: explicitType || null, value: '' };
+  let type = explicitType || inferSelectorType(selector);
+  let value = selector;
+  if (selector.startsWith('css=')) {
+    type = 'css';
+    value = selector.slice(4);
+  } else if (selector.startsWith('xpath=')) {
+    type = 'xpath';
+    value = selector.slice(6);
+  } else if (selector.startsWith('text=')) {
+    type = 'text';
+    value = selector.slice(5);
+  }
+  if (type === 'text') {
+    value = value.replace(/^['"]|['"]$/g, '');
+    value = value.replace(/\\"/g, '"').replace(/\\'/g, "'");
+  }
+  return { type, value };
+}
+
+export function iterateElements(scope, callback) {
+  if (!scope || typeof callback !== 'function') return;
+  if (scope === document) {
+    document.querySelectorAll('*').forEach(callback);
+    return;
+  }
+  if (scope.nodeType === 1) {
+    callback(scope);
+    scope.querySelectorAll('*').forEach(callback);
+  }
+}
+
+export function buildTextXPathExpression(text, matchMode, scopeIsDocument) {
+  const literal = escapeXPathLiteral(text);
+  const base = scopeIsDocument ? '//' : './/';
+  if (matchMode === 'exact') {
+    return `${base}*[normalize-space(.) = ${literal}]`;
+  }
+  return `${base}*[contains(normalize-space(.), ${literal})]`;
+}
+
+export function countMatchesForSelector(parsed, root, options = {}) {
+  if (!parsed || !parsed.value) return 0;
+  const scope = root || document;
+  try {
+    if (parsed.type === 'xpath') {
+      const doc = scope.ownerDocument || document;
+      const contextNode = scope.nodeType ? scope : doc;
+      const iterator = doc.evaluate(parsed.value, contextNode, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
+      let count = 0;
+      let node = iterator.iterateNext();
+      while (node) {
+        count += 1;
+        node = iterator.iterateNext();
+      }
+      return count;
+    }
+    if (parsed.type === 'text') {
+      const targetText = normalizeText(parsed.value);
+      if (!targetText) return 0;
+      const doc = scope.ownerDocument || document;
+      const contextNode = scope.nodeType ? scope : doc;
+      const isDocumentScope = !scope || scope === document || scope.nodeType === 9;
+      const matchMode = options.matchMode === 'contains' ? 'contains' : 'exact';
+      const expression = buildTextXPathExpression(targetText, matchMode, isDocumentScope);
+      const iterator = doc.evaluate(expression, contextNode, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
+      let count = 0;
+      let node = iterator.iterateNext();
+      while (node) {
+        count += 1;
+        node = iterator.iterateNext();
+      }
+      return count;
+    }
+    if (scope === document) {
+      return document.querySelectorAll(parsed.value).length;
+    }
+    let count = scope.querySelectorAll(parsed.value).length;
+    if (scope.matches && scope.matches(parsed.value)) {
+      count += 1;
+    }
+    return count;
+  } catch (err) {
+    return 0;
+  }
+}
+

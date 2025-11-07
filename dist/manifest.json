@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "AI Test Recorder - UI Pro",
+  "version": "1.0",
+  "description": "Improved UI/UX AI Test Recorder (DevTools+Popup)",
+  "permissions": [
+    "scripting",
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "devtools_page": "devtools.html",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}
