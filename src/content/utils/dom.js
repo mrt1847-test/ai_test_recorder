@@ -88,7 +88,8 @@ export function buildUniqueCssPath(element, contextElement) {
     const selectorString = contextElement ? `:scope ${cssPath}` : cssPath;
     const parsed = parseSelectorForMatching(`css=${selectorString}`, 'css');
     const targetScope = contextElement || document;
-    if (countMatchesForSelector(parsed, targetScope) === 1) {
+    const matchCount = countMatchesForSelector(parsed, targetScope);
+    if (matchCount === 1) {
       if (!contextElement && cssPath.startsWith('html:nth-of-type(1) > ')) {
         return cssPath.replace(/^html:nth-of-type\(1\)\s*>\s*/, '');
       }

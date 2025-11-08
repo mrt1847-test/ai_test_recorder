@@ -54,8 +54,6 @@
             <option value="python-class">Python (Class)</option>
             <option value="javascript">JavaScript</option>
             <option value="typescript">TypeScript</option>
-            <option value="cypress-javascript">Cypress (JavaScript)</option>
-            <option value="cypress-typescript">Cypress (TypeScript)</option>
           </select>
         </label>
       </div>
@@ -71,63 +69,65 @@
   </div>
 
   <div id="main">
-    <div id="left">
-      <h4>Timeline</h4>
-      <div id="timeline"></div>
-    </div>
-    <div id="right">
-      <div id="iframe-banner" class="hidden">⚠️ 이 요소는 iframe 내부에 있습니다. 자동 전환 필요</div>
-      <div id="selector-panel"><h4>추천 셀렉터</h4><div id="selector-list"></div></div>
-      <div id="element-panel" class="hidden">
-        <div class="element-header">
-          <h4>요소 선택 흐름</h4>
-          <button id="element-cancel-btn">취소</button>
-        </div>
-        <div id="element-status"></div>
-        <div id="element-path" class="element-section hidden">
-          <div class="element-title">선택 경로</div>
-          <div id="element-path-items"></div>
-        </div>
-        <div id="element-candidates" class="element-section"></div>
-        <div id="element-actions" class="element-section hidden">
-          <div class="element-title">동작 선택</div>
-          <div class="element-action-buttons">
-            <button data-action="click">클릭 이벤트 추가</button>
-            <button data-action="text">텍스트 가져오기</button>
-            <button data-action="value">값(value) 가져오기</button>
-            <button data-action="attribute">속성 가져오기</button>
-            <button data-action="child">하위 노드 선택</button>
-            <button data-action="parent">상위 노드로 이동</button>
-            <button data-action="commit">선택 완료</button>
-            <button data-action="finish">선택 취소</button>
+    <div id="main-top">
+      <div id="timeline-panel">
+        <h4>Timeline</h4>
+        <div id="timeline"></div>
+      </div>
+      <div id="selector-column">
+        <div id="iframe-banner" class="hidden">⚠️ 이 요소는 iframe 내부에 있습니다. 자동 전환 필요</div>
+        <div id="selector-panel"><h4>추천 셀렉터</h4><div id="selector-list"></div></div>
+        <div id="element-panel" class="hidden">
+          <div class="element-header">
+            <h4>요소 선택 흐름</h4>
+            <button id="element-cancel-btn">취소</button>
           </div>
-        </div>
-        <div id="element-attribute-panel" class="element-section hidden">
-          <div class="element-title">속성 추출</div>
-          <div class="element-attr-row">
-            <input id="element-attr-name" placeholder="속성명 (예: href)" />
-            <button id="element-attr-apply">적용</button>
+          <div id="element-status"></div>
+          <div id="element-path" class="element-section hidden">
+            <div class="element-title">선택 경로</div>
+            <div id="element-path-items"></div>
           </div>
-        </div>
-        <div id="element-code-preview" class="element-section hidden">
-          <div class="element-title">현재 코드 미리보기</div>
-          <pre><code id="element-code"></code></pre>
+          <div id="element-candidates" class="element-section"></div>
+          <div id="element-actions" class="element-section hidden">
+            <div class="element-title">동작 선택</div>
+            <div class="element-action-buttons">
+              <button data-action="click">클릭 이벤트 추가</button>
+              <button data-action="text">텍스트 가져오기</button>
+              <button data-action="value">값(value) 가져오기</button>
+              <button data-action="attribute">속성 가져오기</button>
+              <button data-action="child">하위 노드 선택</button>
+              <button data-action="parent">상위 노드로 이동</button>
+              <button data-action="commit">선택 완료</button>
+              <button data-action="finish">선택 취소</button>
+            </div>
+          </div>
+          <div id="element-attribute-panel" class="element-section hidden">
+            <div class="element-title">속성 추출</div>
+            <div class="element-attr-row">
+              <input id="element-attr-name" placeholder="속성명 (예: href)" />
+              <button id="element-attr-apply">적용</button>
+            </div>
+          </div>
+          <div id="element-code-preview" class="element-section hidden">
+            <div class="element-title">현재 코드 미리보기</div>
+            <pre><code id="element-code"></code></pre>
+          </div>
         </div>
       </div>
-      <div id="code-area">
-        <div class="code-area-header">
-          <h4>Code Preview</h4>
-          <div class="code-review-controls">
-            <button id="ai-review-btn" class="toolbar-btn">AI 검토</button>
-            <span id="ai-review-status" class="code-review-status"></span>
-          </div>
-        </div>
-        <textarea id="code-output" class="code-output" spellcheck="false"></textarea>
-        <div id="code-review-summary" class="code-review-summary hidden"></div>
-        <div id="code-review-diff" class="code-review-diff hidden"></div>
-      </div>
-      <div id="replay-log"><h4>Replay Log</h4><div id="log-entries"></div></div>
     </div>
+    <div id="code-area">
+      <div class="code-area-header">
+        <h4>Code Preview</h4>
+        <div class="code-review-controls">
+          <button id="ai-review-btn" class="toolbar-btn">AI 검토</button>
+          <span id="ai-review-status" class="code-review-status"></span>
+        </div>
+      </div>
+      <textarea id="code-output" class="code-output" spellcheck="false"></textarea>
+      <div id="code-review-summary" class="code-review-summary hidden"></div>
+      <div id="code-review-diff" class="code-review-diff hidden"></div>
+    </div>
+    <div id="replay-log"><h4>Replay Log</h4><div id="log-entries"></div></div>
   </div>
 
 <script src="panel.js"></script>

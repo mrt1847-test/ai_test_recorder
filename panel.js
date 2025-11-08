@@ -119,6 +119,25 @@ const aiCodeReviewState = {
   summary: '',
   changes: []
 };
+
+const LANGUAGE_OPTIONS = {
+  playwright: [
+    { value: 'python', label: 'Python' },
+    { value: 'python-class', label: 'Python (Class)' },
+    { value: 'javascript', label: 'JavaScript' },
+    { value: 'typescript', label: 'TypeScript' }
+  ],
+  selenium: [
+    { value: 'python', label: 'Python' },
+    { value: 'python-class', label: 'Python (Class)' },
+    { value: 'javascript', label: 'JavaScript' },
+    { value: 'typescript', label: 'TypeScript' }
+  ],
+  cypress: [
+    { value: 'javascript', label: 'JavaScript' },
+    { value: 'typescript', label: 'TypeScript' }
+  ]
+};
 let recordingStartUrl = '';
 chrome.storage.local.get({ recordingStartUrl: '' }, (data) => {
   if (data && typeof data.recordingStartUrl === 'string') {
@@ -207,6 +226,7 @@ function saveAiSettings() {
     aiSettingsDirty = false;
     setAiSettingsStatus('AI 설정이 저장되었습니다.', 'success');
     refreshSelectorListForCurrentEvent();
+    setAiReviewStatus(aiCodeReviewState.status || 'idle', aiReviewStatusEl ? aiReviewStatusEl.textContent : '');
   });
 }
 
@@ -242,13 +262,28 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     }
   }
   refreshSelectorListForCurrentEvent();
+  if (aiReviewBtn) {
+    aiReviewBtn.disabled = !isAiConfigured() || aiCodeReviewState.status === 'loading';
+  }
+  setAiReviewStatus(aiCodeReviewState.status || 'idle', aiReviewStatusEl ? aiReviewStatusEl.textContent : '');
 });
 
 loadAiSettingsFromStorage();
+if (aiReviewBtn) {
+  aiReviewBtn.disabled = !isAiConfigured();
+}
 
 function setAiReviewStatus(status, message) {
   if (!aiReviewStatusEl) return;
   aiReviewStatusEl.className = 'code-review-status';
+  if (!isAiConfigured()) {
+    aiReviewStatusEl.textContent = '';
+    aiCodeReviewState.status = 'disabled';
+    if (aiReviewBtn) {
+      aiReviewBtn.disabled = true;
+    }
+    return;
+  }
   if (status === 'loading') {
     aiReviewStatusEl.classList.add('info');
     aiReviewStatusEl.textContent = message || 'AI가 코드 검토 중입니다...';
@@ -269,7 +304,8 @@ function setAiReviewStatus(status, message) {
 
 function toggleAiReviewLoading(loading) {
   if (!aiReviewBtn) return;
-  aiReviewBtn.disabled = !!loading;
+  const disabled = !!loading || !isAiConfigured();
+  aiReviewBtn.disabled = disabled;
   aiReviewBtn.classList.toggle('loading', !!loading);
 }
 
@@ -712,19 +748,54 @@ function handleOverlayCommand(msg, sendResponse) {
 const frameworkSelect = document.getElementById('framework-select');
 const languageSelect = document.getElementById('language-select');
 
+function populateLanguageOptions(framework, options = {}) {
+  if (!languageSelect) return;
+  const { preserveSelection = false } = options;
+  const frameworkKey = framework && LANGUAGE_OPTIONS[framework] ? framework : 'playwright';
+  const choices = LANGUAGE_OPTIONS[frameworkKey];
+  const previousValue = preserveSelection ? (languageSelect.value || selectedLanguage) : selectedLanguage;
+  languageSelect.innerHTML = '';
+  let nextValue = null;
+  choices.forEach((choice, index) => {
+    const optionEl = document.createElement('option');
+    optionEl.value = choice.value;
+    optionEl.textContent = choice.label;
+    languageSelect.appendChild(optionEl);
+    if (!nextValue) {
+      nextValue = choice.value;
+    }
+    if (previousValue && choice.value === previousValue) {
+      nextValue = choice.value;
+    }
+  });
+  if (nextValue) {
+    languageSelect.value = nextValue;
+    selectedLanguage = nextValue;
+  }
+}
+
+if (languageSelect) {
+  populateLanguageOptions(selectedFramework, { preserveSelection: true });
+}
+
 // 프레임워크 변경 이벤트
-frameworkSelect.addEventListener('change', (e) => {
-  selectedFramework = e.target.value;
-  updateCode({ preloadedEvents: allEvents }); // 실시간 코드 업데이트
-  updateSelectionCodePreview();
-});
+if (frameworkSelect) {
+  frameworkSelect.addEventListener('change', (e) => {
+    selectedFramework = e.target.value;
+    populateLanguageOptions(selectedFramework, { preserveSelection: true });
+    updateCode({ preloadedEvents: allEvents }); // 실시간 코드 업데이트
+    updateSelectionCodePreview();
+  });
+}
 
 // 언어 변경 이벤트
-languageSelect.addEventListener('change', (e) => {
-  selectedLanguage = e.target.value;
-  updateCode({ preloadedEvents: allEvents }); // 실시간 코드 업데이트
-  updateSelectionCodePreview();
-});
+if (languageSelect) {
+  languageSelect.addEventListener('change', (e) => {
+    selectedLanguage = e.target.value;
+    updateCode({ preloadedEvents: allEvents }); // 실시간 코드 업데이트
+    updateSelectionCodePreview();
+  });
+}
 
 startBtn.addEventListener('click', ()=>{
   triggerStartRecording({source: 'panel'}, (result) => {
@@ -1079,7 +1150,14 @@ function renderAiRequestControls(event, resolvedIndex) {
     statusEl.classList.add('muted');
   }
 
-  actions.appendChild(button);
+  const buttonWrapper = document.createElement('div');
+  buttonWrapper.className = 'selector-ai-button-wrapper';
+  buttonWrapper.setAttribute(
+    'data-tooltip',
+    'AI가 이벤트 컨텍스트와 테스트 목적을 분석해 안정적인 셀렉터를 추천합니다.'
+  );
+  buttonWrapper.appendChild(button);
+  actions.appendChild(buttonWrapper);
   actions.appendChild(statusEl);
   header.appendChild(actions);
   selectorList.appendChild(header);
@@ -2446,7 +2524,7 @@ function buildManualActionCode(action, frameworkLower, languageLower, indent, op
   if (frameworkLower === 'playwright') {
     chainResult = buildPlaywrightLocatorChain(path, languageLower, indent, serial);
   } else if (frameworkLower === 'cypress') {
-    const isTypeScript = languageLower === 'cypress-typescript';
+    const isTypeScript = languageLower === 'typescript';
     const cypressUsage = { usesXPath: false };
     lines.push("describe('AI Test Recorder', () => {");
     lines.push("  it('should run recorded steps', () => {");

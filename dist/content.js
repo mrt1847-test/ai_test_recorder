@@ -85,7 +85,8 @@
       const selectorString = contextElement ? `:scope ${cssPath}` : cssPath;
       const parsed = parseSelectorForMatching(`css=${selectorString}`, "css");
       const targetScope = contextElement || document;
-      if (countMatchesForSelector(parsed, targetScope) === 1) {
+      const matchCount = countMatchesForSelector(parsed, targetScope);
+      if (matchCount === 1) {
         if (!contextElement && cssPath.startsWith("html:nth-of-type(1) > ")) {
           return cssPath.replace(/^html:nth-of-type\(1\)\s*>\s*/, "");
         }
@@ -398,6 +399,25 @@
   var UNIQUE_MATCH_BONUS = 6;
   var DUPLICATE_PENALTY_STEP = 6;
   var CLASS_COMBINATION_LIMIT = 2;
+  var SELECTOR_TYPE_PRIORITY = {
+    id: 100,
+    "data-testid": 96,
+    "data-test": 95,
+    "data-qa": 94,
+    "data-cy": 94,
+    "data-id": 92,
+    "aria-label": 90,
+    name: 88,
+    role: 85,
+    title: 82,
+    text: 78,
+    css: 70,
+    "class-tag": 66,
+    class: 62,
+    tag: 40,
+    xpath: 30,
+    "xpath-full": 5
+  };
   var ATTRIBUTE_PRIORITY = [
     { attr: "id", type: "id", score: 90, reason: "id \uC18D\uC131", allowPartial: false },
     { attr: "data-testid", type: "data-testid", score: 88, reason: "data-testid \uC18D\uC131", allowPartial: true },
@@ -489,6 +509,17 @@
     });
     return results;
   }
+  function getSelectorTypeRank(candidate) {
+    if (!candidate) return 0;
+    const type = candidate.type || inferSelectorType(candidate.selector);
+    if (!type) return 0;
+    if (Object.prototype.hasOwnProperty.call(SELECTOR_TYPE_PRIORITY, type)) {
+      return SELECTOR_TYPE_PRIORITY[type];
+    }
+    if (type.startsWith("data-")) return 90;
+    if (type.includes("partial")) return 75;
+    return 50;
+  }
   function sortCandidates(candidates) {
     return candidates.slice().sort((a, b) => {
       const uniqueA = a.unique ? 1 : 0;
@@ -497,6 +528,9 @@
       const relationA = a.relation === "relative" ? 1 : 0;
       const relationB = b.relation === "relative" ? 1 : 0;
       if (relationA !== relationB) return relationB - relationA;
+      const typeRankA = getSelectorTypeRank(a);
+      const typeRankB = getSelectorTypeRank(b);
+      if (typeRankA !== typeRankB) return typeRankB - typeRankA;
       return (b.score || 0) - (a.score || 0);
     });
   }
@@ -584,7 +618,7 @@
     candidate.reason = reasonParts.join(" \u2022 ");
     if (typeof candidate.score === "number") {
       if (candidate.unique) {
-        candidate.score = Math.min(100, candidate.score + UNIQUE_MATCH_BONUS);
+        candidate.score = Math.min(100, Math.max(candidate.score + UNIQUE_MATCH_BONUS, 95));
       } else if (candidate.matchCount > 1) {
         candidate.score = Math.max(
           10,
@@ -2043,6 +2077,10 @@
   function restoreRecordingState() {
     chrome.storage.local.get(["recording"], (result) => {
       if (result.recording) {
+        if (!recorderState.isRecording) {
+          recorderState.isRecording = true;
+          ensureRecordingState(true);
+        }
         startRecording({ resetEvents: false });
       } else {
         ensureRecordingState(false);

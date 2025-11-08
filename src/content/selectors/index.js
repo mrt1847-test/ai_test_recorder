@@ -18,6 +18,26 @@ const UNIQUE_MATCH_BONUS = 6;
 const DUPLICATE_PENALTY_STEP = 6;
 const CLASS_COMBINATION_LIMIT = 2;
 
+const SELECTOR_TYPE_PRIORITY = {
+  id: 100,
+  'data-testid': 96,
+  'data-test': 95,
+  'data-qa': 94,
+  'data-cy': 94,
+  'data-id': 92,
+  'aria-label': 90,
+  name: 88,
+  role: 85,
+  title: 82,
+  text: 78,
+  css: 70,
+  'class-tag': 66,
+  class: 62,
+  tag: 40,
+  xpath: 30,
+  'xpath-full': 5
+};
+
 const ATTRIBUTE_PRIORITY = [
   { attr: 'id', type: 'id', score: 90, reason: 'id 속성', allowPartial: false },
   { attr: 'data-testid', type: 'data-testid', score: 88, reason: 'data-testid 속성', allowPartial: true },
@@ -120,6 +140,18 @@ function generateClassSelectors(element) {
   return results;
 }
 
+function getSelectorTypeRank(candidate) {
+  if (!candidate) return 0;
+  const type = candidate.type || inferSelectorType(candidate.selector);
+  if (!type) return 0;
+  if (Object.prototype.hasOwnProperty.call(SELECTOR_TYPE_PRIORITY, type)) {
+    return SELECTOR_TYPE_PRIORITY[type];
+  }
+  if (type.startsWith('data-')) return 90;
+  if (type.includes('partial')) return 75;
+  return 50;
+}
+
 function sortCandidates(candidates) {
   return candidates
     .slice()
@@ -130,6 +162,9 @@ function sortCandidates(candidates) {
       const relationA = a.relation === 'relative' ? 1 : 0;
       const relationB = b.relation === 'relative' ? 1 : 0;
       if (relationA !== relationB) return relationB - relationA;
+      const typeRankA = getSelectorTypeRank(a);
+      const typeRankB = getSelectorTypeRank(b);
+      if (typeRankA !== typeRankB) return typeRankB - typeRankA;
       return (b.score || 0) - (a.score || 0);
     });
 }
@@ -226,7 +261,7 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
   candidate.reason = reasonParts.join(' • ');
   if (typeof candidate.score === 'number') {
     if (candidate.unique) {
-      candidate.score = Math.min(100, candidate.score + UNIQUE_MATCH_BONUS);
+      candidate.score = Math.min(100, Math.max(candidate.score + UNIQUE_MATCH_BONUS, 95));
     } else if (candidate.matchCount > 1) {
       candidate.score = Math.max(
         10,
