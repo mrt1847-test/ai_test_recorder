@@ -40,20 +40,35 @@ export function buildFullXPath(el) {
 export function buildCssSegment(el) {
   if (!el || el.nodeType !== 1) return '';
   const tag = el.tagName.toLowerCase();
-  if (el.id) {
-    return `${tag}#${cssEscapeIdent(el.id)}`;
-  }
-  const classList = Array.from(el.classList || []).slice(0, 2).map(cssEscapeIdent).filter(Boolean);
-  if (classList.length) {
-    return `${tag}.${classList.join('.')}`;
-  }
   let index = 1;
   let sibling = el.previousElementSibling;
   while (sibling) {
-    if (sibling.tagName === el.tagName) {
+    if (sibling.nodeType === 1 && sibling.tagName === el.tagName) {
       index += 1;
     }
     sibling = sibling.previousElementSibling;
+  }
+  if (el.id) {
+    return `${tag}#${cssEscapeIdent(el.id)}`;
+  }
+  const rawClassList = Array.from(el.classList || []).filter(Boolean);
+  const classList = rawClassList.slice(0, 2).map(cssEscapeIdent).filter(Boolean);
+  if (classList.length) {
+    const classSelector = `${tag}.${classList.join('.')}`;
+    const parent = el.parentElement;
+    if (parent) {
+      const requiredClasses = rawClassList.slice(0, classList.length);
+      const matchingSiblings = Array.from(parent.children || []).filter((child) => {
+        if (!child || child.nodeType !== 1) return false;
+        if (child.tagName !== el.tagName) return false;
+        const childClasses = child.classList || [];
+        return requiredClasses.every((cls) => childClasses.contains ? childClasses.contains(cls) : childClasses.includes(cls));
+      }).length;
+      if (matchingSiblings > 1) {
+        return `${classSelector}:nth-of-type(${index})`;
+      }
+    }
+    return classSelector;
   }
   return `${tag}:nth-of-type(${index})`;
 }
@@ -128,6 +143,19 @@ export function buildXPathSegment(el) {
   const tag = el.tagName.toLowerCase();
   if (el.id) {
     return `${tag}[@id=${escapeXPathLiteral(el.id)}]`;
+  }
+  const classList = Array.from(el.classList || []).filter(Boolean);
+  if (classList.length) {
+    const cls = classList[0];
+    const containsExpr = `contains(concat(' ', normalize-space(@class), ' '), ${escapeXPathLiteral(' ' + cls + ' ')})`;
+    return `${tag}[${containsExpr}]`;
+  }
+  const attrPriority = ['data-testid', 'data-test', 'data-qa', 'data-cy', 'data-id', 'aria-label', 'role', 'name', 'type'];
+  for (const attr of attrPriority) {
+    const val = el.getAttribute && el.getAttribute(attr);
+    if (val) {
+      return `${tag}[@${attr}=${escapeXPathLiteral(val)}]`;
+    }
   }
   const nameAttr = el.getAttribute && el.getAttribute('name');
   if (nameAttr) {
@@ -274,6 +302,8 @@ export function buildTextXPathExpression(text, matchMode, scopeIsDocument) {
 export function countMatchesForSelector(parsed, root, options = {}) {
   if (!parsed || !parsed.value) return 0;
   const scope = root || document;
+  const maxCount = typeof options.maxCount === 'number' && options.maxCount > 0 ? options.maxCount : Infinity;
+  const shouldClamp = Number.isFinite(maxCount);
   try {
     if (parsed.type === 'xpath') {
       const doc = scope.ownerDocument || document;
@@ -283,6 +313,9 @@ export function countMatchesForSelector(parsed, root, options = {}) {
       let node = iterator.iterateNext();
       while (node) {
         count += 1;
+        if (shouldClamp && count >= maxCount) {
+          return maxCount;
+        }
         node = iterator.iterateNext();
       }
       return count;
@@ -300,16 +333,36 @@ export function countMatchesForSelector(parsed, root, options = {}) {
       let node = iterator.iterateNext();
       while (node) {
         count += 1;
+        if (shouldClamp && count >= maxCount) {
+          return maxCount;
+        }
         node = iterator.iterateNext();
       }
       return count;
     }
-    if (scope === document) {
-      return document.querySelectorAll(parsed.value).length;
+    const result = scope.querySelectorAll(parsed.value);
+    if (!shouldClamp) {
+      if (scope === document) {
+        return result.length;
+      }
+      let count = result.length;
+      if (scope.matches && scope.matches(parsed.value)) {
+        count += 1;
+      }
+      return count;
     }
-    let count = scope.querySelectorAll(parsed.value).length;
-    if (scope.matches && scope.matches(parsed.value)) {
+    let count = 0;
+    for (let i = 0; i < result.length; i += 1) {
       count += 1;
+      if (count >= maxCount) {
+        return maxCount;
+      }
+    }
+    if (scope !== document && scope.matches && scope.matches(parsed.value)) {
+      count += 1;
+      if (count >= maxCount) {
+        return maxCount;
+      }
     }
     return count;
   } catch (err) {

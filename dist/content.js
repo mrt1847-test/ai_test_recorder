@@ -39,20 +39,35 @@
   function buildCssSegment(el) {
     if (!el || el.nodeType !== 1) return "";
     const tag = el.tagName.toLowerCase();
-    if (el.id) {
-      return `${tag}#${cssEscapeIdent(el.id)}`;
-    }
-    const classList = Array.from(el.classList || []).slice(0, 2).map(cssEscapeIdent).filter(Boolean);
-    if (classList.length) {
-      return `${tag}.${classList.join(".")}`;
-    }
     let index = 1;
     let sibling = el.previousElementSibling;
     while (sibling) {
-      if (sibling.tagName === el.tagName) {
+      if (sibling.nodeType === 1 && sibling.tagName === el.tagName) {
         index += 1;
       }
       sibling = sibling.previousElementSibling;
+    }
+    if (el.id) {
+      return `${tag}#${cssEscapeIdent(el.id)}`;
+    }
+    const rawClassList = Array.from(el.classList || []).filter(Boolean);
+    const classList = rawClassList.slice(0, 2).map(cssEscapeIdent).filter(Boolean);
+    if (classList.length) {
+      const classSelector = `${tag}.${classList.join(".")}`;
+      const parent = el.parentElement;
+      if (parent) {
+        const requiredClasses = rawClassList.slice(0, classList.length);
+        const matchingSiblings = Array.from(parent.children || []).filter((child) => {
+          if (!child || child.nodeType !== 1) return false;
+          if (child.tagName !== el.tagName) return false;
+          const childClasses = child.classList || [];
+          return requiredClasses.every((cls) => childClasses.contains ? childClasses.contains(cls) : childClasses.includes(cls));
+        }).length;
+        if (matchingSiblings > 1) {
+          return `${classSelector}:nth-of-type(${index})`;
+        }
+      }
+      return classSelector;
     }
     return `${tag}:nth-of-type(${index})`;
   }
@@ -123,6 +138,19 @@
     const tag = el.tagName.toLowerCase();
     if (el.id) {
       return `${tag}[@id=${escapeXPathLiteral(el.id)}]`;
+    }
+    const classList = Array.from(el.classList || []).filter(Boolean);
+    if (classList.length) {
+      const cls = classList[0];
+      const containsExpr = `contains(concat(' ', normalize-space(@class), ' '), ${escapeXPathLiteral(" " + cls + " ")})`;
+      return `${tag}[${containsExpr}]`;
+    }
+    const attrPriority = ["data-testid", "data-test", "data-qa", "data-cy", "data-id", "aria-label", "role", "name", "type"];
+    for (const attr of attrPriority) {
+      const val = el.getAttribute && el.getAttribute(attr);
+      if (val) {
+        return `${tag}[@${attr}=${escapeXPathLiteral(val)}]`;
+      }
     }
     const nameAttr = el.getAttribute && el.getAttribute("name");
     if (nameAttr) {
@@ -398,7 +426,17 @@
   var DEFAULT_TAG_SCORE = 20;
   var UNIQUE_MATCH_BONUS = 6;
   var DUPLICATE_PENALTY_STEP = 6;
-  var CLASS_COMBINATION_LIMIT = 2;
+  var CLASS_COMBINATION_LIMIT = 3;
+  var MAX_CLASS_COMBINATIONS = 24;
+  var TEXT_PARENT_MAX_DEPTH = 4;
+  var TEXT_PARENT_CLASS_LIMIT = 4;
+  var TEXT_PARENT_COMBINATION_LIMIT = 3;
+  var TEXT_PARENT_MAX_COMBINATIONS = 12;
+  var CSS_PARENT_MAX_DEPTH = 3;
+  var CSS_PARENT_CLASS_LIMIT = 4;
+  var CSS_PARENT_COMBINATION_LIMIT = 3;
+  var CSS_PARENT_MAX_COMBINATIONS = 20;
+  var CSS_SIMPLE_PARENT_MAX_DEPTH = 4;
   var SELECTOR_TYPE_PRIORITY = {
     id: 100,
     "data-testid": 96,
@@ -492,7 +530,7 @@
       if (lenDiff !== 0) return lenDiff;
       return a.localeCompare(b);
     });
-    ordered.slice(0, 12).forEach((key) => {
+    ordered.slice(0, MAX_CLASS_COMBINATIONS).forEach((key) => {
       const classSelector = `.${key}`;
       results.push({
         type: "class",
@@ -533,6 +571,261 @@
       if (typeRankA !== typeRankB) return typeRankB - typeRankA;
       return (b.score || 0) - (a.score || 0);
     });
+  }
+  function buildClassCombinationLists(classes, options = {}) {
+    const {
+      limit = TEXT_PARENT_COMBINATION_LIMIT,
+      maxResults = TEXT_PARENT_MAX_COMBINATIONS,
+      classLimit = TEXT_PARENT_CLASS_LIMIT
+    } = options;
+    const uniqueClasses = Array.from(new Set(classes)).filter(Boolean).slice(0, classLimit);
+    const combos = [];
+    function backtrack(start, current) {
+      if (current.length > 0 && combos.length < maxResults) {
+        combos.push([...current]);
+      }
+      if (current.length === limit) return;
+      for (let i = start; i < uniqueClasses.length && combos.length < maxResults; i += 1) {
+        current.push(uniqueClasses[i]);
+        backtrack(i + 1, current);
+        current.pop();
+      }
+    }
+    backtrack(0, []);
+    return combos;
+  }
+  function tryBuildAncestorTextXPath(element, textValue, matchMode) {
+    if (!element || !textValue) return null;
+    const normalized = normalizeText(textValue);
+    if (!normalized) return null;
+    const literal = escapeXPathLiteral(normalized);
+    const textExpr = matchMode === "contains" ? `contains(normalize-space(.), ${literal})` : `normalize-space(.) = ${literal}`;
+    const elementClassList = Array.from(element.classList || []).filter(Boolean);
+    if (elementClassList.length) {
+      for (const cls of elementClassList.slice(0, TEXT_PARENT_CLASS_LIMIT)) {
+        const literalClass = escapeXPathLiteral(cls);
+        const tagName = element.tagName ? element.tagName.toLowerCase() : "*";
+        const candidates = [
+          `//*[@class=${literalClass} and normalize-space(.) = ${literal}]`,
+          `//*[@class=${literalClass} and contains(normalize-space(.), ${literal})]`,
+          `//${tagName}[@class=${literalClass} and normalize-space(.) = ${literal}]`,
+          `//${tagName}[@class=${literalClass} and contains(normalize-space(.), ${literal})]`
+        ];
+        for (const xpathExpr of candidates) {
+          const selector = `xpath=${xpathExpr}`;
+          const parsed = parseSelectorForMatching(selector, "xpath");
+          const count = countMatchesForSelector(parsed, document, { matchMode });
+          if (count === 1) {
+            return { selector, count };
+          }
+        }
+      }
+    }
+    let current = element.parentElement;
+    let depth = 0;
+    while (current && depth < TEXT_PARENT_MAX_DEPTH) {
+      depth += 1;
+      if (current.nodeType !== 1) {
+        current = current.parentElement;
+        continue;
+      }
+      const classList = Array.from(current.classList || []).filter(Boolean);
+      const tagName = current.tagName ? current.tagName.toLowerCase() : "*";
+      if (classList.length > 0) {
+        for (const cls of classList.slice(0, TEXT_PARENT_CLASS_LIMIT)) {
+          const classLiteral = escapeXPathLiteral(cls);
+          const classXPath = `//*[@class=${classLiteral}]//*[${textExpr}]`;
+          const classSelector = `xpath=${classXPath}`;
+          const classParsed = parseSelectorForMatching(classSelector, "xpath");
+          const classCount = countMatchesForSelector(classParsed, document, { matchMode });
+          if (classCount === 1) {
+            return { selector: classSelector, count: classCount };
+          }
+          const tagClassXPath = `//${tagName}[@class=${classLiteral}]//*[${textExpr}]`;
+          const tagClassSelector = `xpath=${tagClassXPath}`;
+          const tagClassParsed = parseSelectorForMatching(tagClassSelector, "xpath");
+          const tagClassCount = countMatchesForSelector(tagClassParsed, document, { matchMode });
+          if (tagClassCount === 1) {
+            return { selector: tagClassSelector, count: tagClassCount };
+          }
+        }
+      } else if (tagName && tagName !== "*") {
+        const tagOnlyXPath = `//${tagName}[${textExpr}]`;
+        const tagOnlySelector = `xpath=${tagOnlyXPath}`;
+        const tagOnlyParsed = parseSelectorForMatching(tagOnlySelector, "xpath");
+        const tagOnlyCount = countMatchesForSelector(tagOnlyParsed, document, { matchMode });
+        if (tagOnlyCount === 1) {
+          return { selector: tagOnlySelector, count: tagOnlyCount };
+        }
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+  function extractCssSelector(candidate) {
+    if (!candidate) return null;
+    const selector = candidate.selector || "";
+    const type = candidate.type || inferSelectorType(selector);
+    if (type === "css") {
+      return selector.startsWith("css=") ? selector.slice(4) : selector;
+    }
+    if (type === "class" || type === "class-tag" || type === "id" || type === "tag") {
+      return selector;
+    }
+    if (type === "text") return null;
+    return null;
+  }
+  function tryBuildAncestorCssSelector(element, baseSelector, contextElement) {
+    if (!element || !baseSelector) return null;
+    const base = baseSelector.startsWith("css=") ? baseSelector.slice(4).trim() : baseSelector.trim();
+    if (!base) return null;
+    const tested = /* @__PURE__ */ new Set();
+    const scopedPrefix = contextElement ? ":scope " : "";
+    let current = element.parentElement;
+    let depth = 0;
+    let paths = [base];
+    while (current && depth < CSS_PARENT_MAX_DEPTH && paths.length) {
+      depth += 1;
+      if (current.nodeType !== 1) {
+        current = current.parentElement;
+        continue;
+      }
+      const ancestorSelectors = [];
+      if (current.id) {
+        ancestorSelectors.push(`#${cssEscapeIdent(current.id)}`);
+      }
+      const classList = Array.from(current.classList || []).filter(Boolean);
+      if (classList.length) {
+        const combos = buildClassCombinationLists(classList, {
+          limit: CSS_PARENT_COMBINATION_LIMIT,
+          maxResults: CSS_PARENT_MAX_COMBINATIONS,
+          classLimit: CSS_PARENT_CLASS_LIMIT
+        });
+        combos.forEach((combo) => {
+          const escaped = combo.map((cls) => cssEscapeIdent(cls));
+          if (escaped.length) {
+            ancestorSelectors.push(`.${escaped.join(".")}`);
+            const tag = current.tagName ? current.tagName.toLowerCase() : "*";
+            ancestorSelectors.push(`${tag}.${escaped.join(".")}`);
+          }
+        });
+      }
+      const tagName = current.tagName ? current.tagName.toLowerCase() : "*";
+      ancestorSelectors.push(tagName);
+      const newPaths = [];
+      for (const ancestorSelector of ancestorSelectors) {
+        for (const path of paths) {
+          const directSelector = `${ancestorSelector} > ${path}`;
+          const descendantSelector = `${ancestorSelector} ${path}`;
+          const candidates = [directSelector, descendantSelector];
+          for (const candidatePath of candidates) {
+            const normalized = candidatePath.trim();
+            if (!normalized || tested.has(normalized)) continue;
+            tested.add(normalized);
+            const fullSelector = contextElement ? `:scope ${normalized}` : normalized;
+            const parsed = parseSelectorForMatching(`css=${fullSelector}`, "css");
+            const targetScope = contextElement || document;
+            const count = countMatchesForSelector(parsed, targetScope);
+            if (count === 1) {
+              return {
+                selector: `css=${fullSelector}`,
+                count
+              };
+            }
+            newPaths.push(normalized);
+          }
+        }
+      }
+      paths = Array.from(new Set(newPaths)).slice(0, CSS_PARENT_MAX_COMBINATIONS);
+      current = current.parentElement;
+    }
+    return null;
+  }
+  function tryBuildSimpleAncestorCss(element, baseSelector, contextElement) {
+    if (!element || !baseSelector) return null;
+    const base = baseSelector.startsWith("css=") ? baseSelector.slice(4).trim() : baseSelector.trim();
+    if (!base) return null;
+    const scopedPrefix = contextElement ? ":scope " : "";
+    const targetScope = contextElement || document;
+    let current = element;
+    let selector = base;
+    let depth = 0;
+    const buildParentSelector = (node) => {
+      if (!node || node.nodeType !== 1) return null;
+      if (node.id) {
+        return `#${cssEscapeIdent(node.id)}`;
+      }
+      const classList = Array.from(node.classList || []).filter(Boolean);
+      if (classList.length) {
+        return `.${cssEscapeIdent(classList[0])}`;
+      }
+      return node.tagName ? node.tagName.toLowerCase() : null;
+    };
+    while (current && depth < CSS_SIMPLE_PARENT_MAX_DEPTH) {
+      const fullSelector = contextElement ? `css=${scopedPrefix}${selector}` : `css=${selector}`;
+      const parsed = parseSelectorForMatching(fullSelector, "css");
+      const count = countMatchesForSelector(parsed, targetScope);
+      if (count === 1) {
+        return { selector: fullSelector, count };
+      }
+      const parent = current.parentElement;
+      if (!parent) break;
+      const parentSelector = buildParentSelector(parent);
+      if (!parentSelector) break;
+      selector = `${parentSelector} > ${selector}`;
+      current = parent;
+      depth += 1;
+    }
+    const finalSelector = contextElement ? `css=${scopedPrefix}${selector}` : `css=${selector}`;
+    const finalParsed = parseSelectorForMatching(finalSelector, "css");
+    const finalCount = countMatchesForSelector(finalParsed, targetScope);
+    if (finalCount === 1) {
+      return { selector: finalSelector, count: finalCount };
+    }
+    return null;
+  }
+  function buildFirstNthOfTypeSelector(element) {
+    if (!element || element.nodeType !== 1) return null;
+    const parent = element.parentElement;
+    if (!parent) return null;
+    const tagName = element.tagName ? element.tagName.toLowerCase() : null;
+    if (!tagName) return null;
+    const siblings = Array.from(parent.children || []);
+    let nth = 0;
+    for (const sibling of siblings) {
+      if (!sibling || sibling.nodeType !== 1) continue;
+      if (!sibling.tagName) continue;
+      if (sibling.tagName.toLowerCase() === tagName) {
+        nth += 1;
+        if (sibling === element) break;
+      }
+    }
+    if (nth !== 1) return null;
+    const classList = Array.from(element.classList || []).filter(Boolean);
+    if (!classList.length) return null;
+    const escapedClasses = classList.slice(0, 2).map((cls) => cssEscapeIdent(cls)).filter(Boolean);
+    if (!escapedClasses.length) return null;
+    const selector = `${tagName}.${escapedClasses.join(".")}:nth-of-type(1)`;
+    const scopedResult = tryBuildSimpleAncestorCss(element, selector, null);
+    if (scopedResult && scopedResult.count === 1) {
+      return {
+        type: "css",
+        selector: scopedResult.selector,
+        score: 88,
+        reason: "\uCCAB \uBC88\uC9F8 \uD56D\uBAA9 (nth-of-type)"
+      };
+    }
+    const parsed = parseSelectorForMatching(`css=${selector}`, "css");
+    const count = countMatchesForSelector(parsed, document);
+    if (count === 1) {
+      return {
+        type: "css",
+        selector: `css=${selector}`,
+        score: 84,
+        reason: "\uCCAB \uBC88\uC9F8 \uD56D\uBAA9 (nth-of-type)"
+      };
+    }
+    return null;
   }
   function getIframeContext(target) {
     try {
@@ -595,8 +888,50 @@
     if (!options.skipGlobalCheck && candidate.unique === false && typeof candidate.score === "number") {
       candidate.score = Math.min(candidate.score, options.duplicateScore ?? 55);
     }
-    if (options.skipGlobalCheck && candidate.unique === false && typeof candidate.score === "number") {
+    if (!options.skipGlobalCheck && candidate.unique === false && typeof candidate.score === "number") {
       candidate.score = Math.min(candidate.score, options.duplicateScore ?? 60);
+    }
+    if (!candidate.unique && originalType === "text" && options.element && (candidate.textValue || parsed.value)) {
+      const ancestorResult = tryBuildAncestorTextXPath(
+        options.element,
+        candidate.textValue || parsed.value,
+        candidate.matchMode || "exact"
+      );
+      if (ancestorResult) {
+        candidate.selector = ancestorResult.selector;
+        candidate.type = "xpath";
+        candidate.matchCount = ancestorResult.count;
+        candidate.unique = true;
+        candidate.uniqueInContext = true;
+        candidate.relation = candidate.relation || "global";
+        reasonParts.push("\uC0C1\uC704 class + \uD14D\uC2A4\uD2B8 \uC870\uD569");
+      }
+    }
+    if (!candidate.unique && options.element) {
+      const baseCssSelector = extractCssSelector(candidate);
+      if (baseCssSelector) {
+        const simpleDerived = tryBuildSimpleAncestorCss(options.element, baseCssSelector, options.contextElement);
+        if (simpleDerived) {
+          candidate.selector = simpleDerived.selector;
+          candidate.type = "css";
+          candidate.matchCount = simpleDerived.count;
+          candidate.unique = true;
+          candidate.uniqueInContext = true;
+          candidate.relation = options.contextElement ? "relative" : candidate.relation || "global";
+          reasonParts.push("\uBD80\uBAA8 \uD0DC\uADF8 \uACBD\uB85C \uC870\uD569");
+        } else {
+          const derived = tryBuildAncestorCssSelector(options.element, baseCssSelector, options.contextElement);
+          if (derived) {
+            candidate.selector = derived.selector;
+            candidate.type = "css";
+            candidate.matchCount = derived.count;
+            candidate.unique = true;
+            candidate.uniqueInContext = true;
+            candidate.relation = options.contextElement ? "relative" : candidate.relation || "global";
+            reasonParts.push("\uC0C1\uC704 class \uACBD\uB85C \uC870\uD569");
+          }
+        }
+      }
     }
     if (originalType !== "text" && originalType !== "xpath" && !candidate.unique && options.element && options.enableIndexing !== false) {
       const contextEl = options.contextElement && candidate.relation === "relative" ? options.contextElement : null;
@@ -661,7 +996,9 @@
       flags.push("\uAD6C\uC870 \uC758\uC874 XPath");
     }
     if ((inferredType === "css" || inferredType === "class" || inferredType === "class-tag" || inferredType === "id") && /:nth-(child|of-type)\(/i.test(selector)) {
-      penalty += 8;
+      const match = selector.match(/:nth-(?:child|of-type)\((\d+)\)/i);
+      const nthValue = match ? parseInt(match[1], 10) : null;
+      penalty += nthValue === 1 ? 2 : 6;
       flags.push("nth-of-type \uC0AC\uC6A9");
     }
     if (inferredType === "class" || inferredType === "class-tag") {
@@ -731,6 +1068,10 @@
       { type: "tag", selector: element.tagName.toLowerCase(), score: DEFAULT_TAG_SCORE, reason: "\uD0DC\uADF8 \uC774\uB984" },
       { duplicateScore: 28, allowZero: true, element }
     );
+    const firstNthCandidate = buildFirstNthOfTypeSelector(element);
+    if (firstNthCandidate) {
+      addCandidate(registry, firstNthCandidate, { duplicateScore: 66, element });
+    }
     return sortCandidates(registry.list());
   }
   function getChildSelectorCandidates(parent, child) {

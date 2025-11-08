@@ -119,6 +119,68 @@ const aiCodeReviewState = {
   summary: '',
   changes: []
 };
+function resolveTimelineSelector(event) {
+  if (!event) return '';
+  const cleanedPrimary = normalizeTimelineSelectorValue(event.primarySelector);
+  if (cleanedPrimary) return cleanedPrimary;
+  if (Array.isArray(event.selectorCandidates)) {
+    const candidate = event.selectorCandidates.find((c) => normalizeTimelineSelectorValue(c && c.selector));
+    if (candidate && normalizeTimelineSelectorValue(candidate.selector)) {
+      return normalizeTimelineSelectorValue(candidate.selector);
+    }
+  }
+  const xpathValue = normalizeTimelineSelectorValue(event.primarySelectorXPath);
+  if (xpathValue) return xpathValue;
+  const textValue = normalizeTimelineSelectorValue(event.primarySelectorText);
+  if (textValue) return textValue;
+  const storedValue = normalizeTimelineSelectorValue(event.primarySelectorValue);
+  if (storedValue) return storedValue;
+  const rawSelector = normalizeTimelineSelectorValue(event.selector);
+  if (rawSelector) return rawSelector;
+  if (event.tag && typeof event.tag === 'string') {
+    return event.tag.toLowerCase();
+  }
+  return '';
+}
+
+function normalizeTimelineSelectorValue(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length === 0) return '';
+  if (/셀렉터$/i.test(trimmed)) return '';
+  return trimmed;
+}
+
+function formatSelectorTypeLabel(type) {
+  if (!type) return '선택된 셀렉터';
+  const lowered = type.toLowerCase();
+  switch (lowered) {
+    case 'css':
+      return 'CSS 셀렉터';
+    case 'text':
+      return '텍스트 셀렉터';
+    case 'xpath':
+      return 'XPath 셀렉터';
+    case 'xpath-full':
+      return '절대 XPath 셀렉터';
+    case 'id':
+      return 'ID 셀렉터';
+    case 'class':
+      return '클래스 셀렉터';
+    case 'class-tag':
+      return '태그+클래스 셀렉터';
+    case 'tag':
+      return '태그 셀렉터';
+    case 'data-testid':
+    case 'data-test':
+    case 'data-qa':
+    case 'data-cy':
+    case 'data-id':
+      return `${lowered.toUpperCase()} 셀렉터`;
+    default:
+      return `${lowered.toUpperCase()} 셀렉터`;
+  }
+}
 
 const LANGUAGE_OPTIONS = {
   playwright: [
@@ -1415,8 +1477,32 @@ function appendTimelineItem(ev, index) {
   const div = document.createElement('div');
   div.className = 'timeline-item';
   div.dataset.eventIndex = index;
-  const usedSelector = ev.primarySelector || (ev.selectorCandidates && ev.selectorCandidates[0] && ev.selectorCandidates[0].selector) || ev.tag;
-  div.textContent = new Date(ev.timestamp).toLocaleTimeString() + ' - ' + ev.action + ' - ' + usedSelector;
+  const timestamp = ev.timestamp ? new Date(ev.timestamp) : null;
+  const timeLabel = timestamp
+    ? `${String(timestamp.getHours()).padStart(2, '0')}:${String(timestamp.getMinutes()).padStart(2, '0')}:${String(timestamp.getSeconds()).padStart(2, '0')}`
+    : '--:--:--';
+  const actionLabel = ev.action || 'event';
+  const usedSelector = resolveTimelineSelector(ev);
+  const row = document.createElement('div');
+  row.className = 'timeline-row';
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'time';
+  timeSpan.textContent = timeLabel;
+  const eventSpan = document.createElement('span');
+  eventSpan.className = 'event';
+  eventSpan.textContent = actionLabel;
+  row.appendChild(timeSpan);
+  row.appendChild(eventSpan);
+
+  const selectorLine = document.createElement('div');
+  selectorLine.className = 'selector-line';
+  const selectorValue = document.createElement('span');
+  selectorValue.className = 'value';
+  selectorValue.textContent = usedSelector || '';
+  selectorLine.appendChild(selectorValue);
+
+  div.appendChild(row);
+  div.appendChild(selectorLine);
   div.style.cursor = 'pointer';
   div.addEventListener('click', () => {
     // 이전 선택 해제
@@ -1525,6 +1611,15 @@ function renderSelectorGroup(candidates, options = {}) {
   candidates.forEach((candidate, listIndex) => {
     const candidateRef = listRef && listRef[listIndex] ? listRef[listIndex] : candidate;
     if (!candidateRef || !candidateRef.selector) return;
+    const matchCount = typeof candidateRef.matchCount === 'number' ? candidateRef.matchCount : null;
+    const contextMatchCount = typeof candidateRef.contextMatchCount === 'number' ? candidateRef.contextMatchCount : null;
+    const effectiveCount = matchCount !== null ? matchCount : contextMatchCount;
+    if (effectiveCount !== null && effectiveCount !== 1) {
+      return;
+    }
+    if (candidateRef.unique === false) {
+      return;
+    }
     const item = document.createElement('div');
     item.className = 'selector-item';
     const selectorType = candidateRef.type || inferSelectorType(candidateRef.selector);
