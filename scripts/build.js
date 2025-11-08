@@ -34,6 +34,11 @@ function copyStaticAssets() {
   if (existsSync(iconsSrc)) {
     cpSync(iconsSrc, resolve(distDir, 'icons'), { recursive: true });
   }
+
+  const vendorSrc = resolve(projectRoot, 'vendor');
+  if (existsSync(vendorSrc)) {
+    cpSync(vendorSrc, resolve(distDir, 'vendor'), { recursive: true });
+  }
 }
 
 async function buildContentScript() {

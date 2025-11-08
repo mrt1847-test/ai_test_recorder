@@ -486,20 +486,24 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
   if (!baseCandidate || !baseCandidate.selector) return null;
   const candidate = { ...baseCandidate };
   const originalType = candidate.type || inferSelectorType(candidate.selector);
-  const parsed = parseSelectorForMatching(candidate.selector, candidate.type);
-  const reasonParts = candidate.reason ? [candidate.reason] : [];
+  const resolvedType = candidate.type || originalType;
+  const parsed = parseSelectorForMatching(candidate.selector, resolvedType);
+  let reasonParts = candidate.reason ? [candidate.reason] : [];
 
   if (!options.skipGlobalCheck) {
-    const matchOptions = { matchMode: candidate.matchMode };
-    if (options.maxMatchSample > 0) {
-      matchOptions.maxCount = options.maxMatchSample;
-    }
+  const matchOptions = {
+    matchMode: candidate.matchMode,
+    maxCount: typeof options.maxMatchSample === 'number' && options.maxMatchSample > 0
+      ? options.maxMatchSample
+      : 4
+  };
     const globalCount = countMatchesForSelector(parsed, document, matchOptions);
     candidate.matchCount = globalCount;
     candidate.unique = globalCount === 1;
     if (globalCount === 0 && options.allowZero !== true) {
       return null;
     }
+    reasonParts = reasonParts.filter((part) => !/유일 일치|개 요소와 일치/.test(part));
     if (globalCount === 1) {
       reasonParts.push('유일 일치');
     } else if (globalCount > 1) {
@@ -550,9 +554,6 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
     if (ancestorResult) {
       candidate.selector = ancestorResult.selector;
       candidate.type = 'xpath';
-      candidate.matchCount = ancestorResult.count;
-      candidate.unique = true;
-      candidate.uniqueInContext = true;
       candidate.relation = candidate.relation || 'global';
       if (ancestorResult.reason) {
         reasonParts.push(ancestorResult.reason);
@@ -569,9 +570,6 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
       if (simpleDerived) {
         candidate.selector = simpleDerived.selector;
         candidate.type = 'css';
-        candidate.matchCount = simpleDerived.count;
-        candidate.unique = true;
-        candidate.uniqueInContext = true;
         candidate.relation = options.contextElement ? 'relative' : candidate.relation || 'global';
         reasonParts.push('부모 태그 경로 조합');
       } else {
@@ -579,9 +577,6 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
         if (derived) {
           candidate.selector = derived.selector;
           candidate.type = 'css';
-          candidate.matchCount = derived.count;
-          candidate.unique = true;
-          candidate.uniqueInContext = true;
           candidate.relation = options.contextElement ? 'relative' : candidate.relation || 'global';
           reasonParts.push('상위 class 경로 조합');
         }
@@ -598,12 +593,29 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
       if (count === 1) {
         candidate.selector = uniqueSelector;
         candidate.type = 'css';
-        candidate.matchCount = count;
-        candidate.unique = true;
-        candidate.uniqueInContext = true;
         candidate.relation = contextEl ? 'relative' : candidate.relation;
         reasonParts.push('경로 인덱싱 적용');
       }
+    }
+  }
+
+  if (!candidate.unique) {
+    const verificationParsed = parseSelectorForMatching(candidate.selector, candidate.type || inferSelectorType(candidate.selector));
+    const verificationCount = countMatchesForSelector(
+      verificationParsed,
+      options.contextElement || document,
+      { matchMode: candidate.matchMode, maxCount: 4 }
+    );
+    candidate.matchCount = verificationCount;
+    candidate.unique = verificationCount === 1;
+    candidate.uniqueInContext = verificationCount === 1;
+    reasonParts = reasonParts.filter((part) => !/유일 일치|개 요소와 일치/.test(part));
+    if (verificationCount === 1) {
+      reasonParts.push('유일 일치');
+    } else if (verificationCount === 2) {
+      reasonParts.push('2개 요소와 일치 (추가 조합)');
+    } else if (verificationCount > 2) {
+      reasonParts.push(`${verificationCount}개 요소와 일치`);
     }
   }
 

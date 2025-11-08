@@ -277,6 +277,8 @@
   function countMatchesForSelector(parsed, root, options = {}) {
     if (!parsed || !parsed.value) return 0;
     const scope = root || document;
+    const maxCount = typeof options.maxCount === "number" && options.maxCount > 0 ? options.maxCount : Infinity;
+    const shouldClamp = Number.isFinite(maxCount);
     try {
       if (parsed.type === "xpath") {
         const doc = scope.ownerDocument || document;
@@ -286,6 +288,9 @@
         let node = iterator.iterateNext();
         while (node) {
           count2 += 1;
+          if (shouldClamp && count2 >= maxCount) {
+            return maxCount;
+          }
           node = iterator.iterateNext();
         }
         return count2;
@@ -303,16 +308,36 @@
         let node = iterator.iterateNext();
         while (node) {
           count2 += 1;
+          if (shouldClamp && count2 >= maxCount) {
+            return maxCount;
+          }
           node = iterator.iterateNext();
         }
         return count2;
       }
-      if (scope === document) {
-        return document.querySelectorAll(parsed.value).length;
+      const result = scope.querySelectorAll(parsed.value);
+      if (!shouldClamp) {
+        if (scope === document) {
+          return result.length;
+        }
+        let count2 = result.length;
+        if (scope.matches && scope.matches(parsed.value)) {
+          count2 += 1;
+        }
+        return count2;
       }
-      let count = scope.querySelectorAll(parsed.value).length;
-      if (scope.matches && scope.matches(parsed.value)) {
+      let count = 0;
+      for (let i = 0; i < result.length; i += 1) {
         count += 1;
+        if (count >= maxCount) {
+          return maxCount;
+        }
+      }
+      if (scope !== document && scope.matches && scope.matches(parsed.value)) {
+        count += 1;
+        if (count >= maxCount) {
+          return maxCount;
+        }
       }
       return count;
     } catch (err) {
@@ -616,7 +641,12 @@
           const parsed = parseSelectorForMatching(selector, "xpath");
           const count = countMatchesForSelector(parsed, document, { matchMode });
           if (count === 1) {
-            return { selector, count };
+            const isTagVariant = xpathExpr.startsWith(`//${tagName}`);
+            return {
+              selector,
+              count,
+              reason: isTagVariant ? "\uD0DC\uADF8+\uD074\uB798\uC2A4 + \uD14D\uC2A4\uD2B8 \uC870\uD569" : "\uD074\uB798\uC2A4 + \uD14D\uC2A4\uD2B8 \uC870\uD569"
+            };
           }
         }
       }
@@ -639,14 +669,22 @@
           const classParsed = parseSelectorForMatching(classSelector, "xpath");
           const classCount = countMatchesForSelector(classParsed, document, { matchMode });
           if (classCount === 1) {
-            return { selector: classSelector, count: classCount };
+            return {
+              selector: classSelector,
+              count: classCount,
+              reason: "\uC0C1\uC704 \uD074\uB798\uC2A4 + \uD14D\uC2A4\uD2B8 \uC870\uD569"
+            };
           }
           const tagClassXPath = `//${tagName}[@class=${classLiteral}]//*[${textExpr}]`;
           const tagClassSelector = `xpath=${tagClassXPath}`;
           const tagClassParsed = parseSelectorForMatching(tagClassSelector, "xpath");
           const tagClassCount = countMatchesForSelector(tagClassParsed, document, { matchMode });
           if (tagClassCount === 1) {
-            return { selector: tagClassSelector, count: tagClassCount };
+            return {
+              selector: tagClassSelector,
+              count: tagClassCount,
+              reason: "\uC0C1\uC704 \uD0DC\uADF8+\uD074\uB798\uC2A4 + \uD14D\uC2A4\uD2B8 \uC870\uD569"
+            };
           }
         }
       } else if (tagName && tagName !== "*") {
@@ -655,7 +693,11 @@
         const tagOnlyParsed = parseSelectorForMatching(tagOnlySelector, "xpath");
         const tagOnlyCount = countMatchesForSelector(tagOnlyParsed, document, { matchMode });
         if (tagOnlyCount === 1) {
-          return { selector: tagOnlySelector, count: tagOnlyCount };
+          return {
+            selector: tagOnlySelector,
+            count: tagOnlyCount,
+            reason: "\uC0C1\uC704 \uD0DC\uADF8 + \uD14D\uC2A4\uD2B8 \uC870\uD569"
+          };
         }
       }
       current = current.parentElement;
@@ -846,19 +888,25 @@
     if (!baseCandidate || !baseCandidate.selector) return null;
     const candidate = { ...baseCandidate };
     const originalType = candidate.type || inferSelectorType(candidate.selector);
-    const parsed = parseSelectorForMatching(candidate.selector, candidate.type);
-    const reasonParts = candidate.reason ? [candidate.reason] : [];
+    const resolvedType = candidate.type || originalType;
+    const parsed = parseSelectorForMatching(candidate.selector, resolvedType);
+    let reasonParts = candidate.reason ? [candidate.reason] : [];
     if (!options.skipGlobalCheck) {
-      const globalCount = countMatchesForSelector(parsed, document, { matchMode: candidate.matchMode });
+      const matchOptions = {
+        matchMode: candidate.matchMode,
+        maxCount: typeof options.maxMatchSample === "number" && options.maxMatchSample > 0 ? options.maxMatchSample : 4
+      };
+      const globalCount = countMatchesForSelector(parsed, document, matchOptions);
       candidate.matchCount = globalCount;
       candidate.unique = globalCount === 1;
       if (globalCount === 0 && options.allowZero !== true) {
         return null;
       }
+      reasonParts = reasonParts.filter((part) => !/유일 일치|개 요소와 일치/.test(part));
       if (globalCount === 1) {
         reasonParts.push("\uC720\uC77C \uC77C\uCE58");
       } else if (globalCount > 1) {
-        reasonParts.push(`${globalCount}\uAC1C \uC694\uC18C\uC640 \uC77C\uCE58`);
+        reasonParts.push(globalCount === 2 ? "2\uAC1C \uC694\uC18C\uC640 \uC77C\uCE58 (\uCD94\uAC00 \uC870\uD569)" : `${globalCount}\uAC1C \uC694\uC18C\uC640 \uC77C\uCE58`);
       }
     }
     if (options.contextElement) {
@@ -900,11 +948,12 @@
       if (ancestorResult) {
         candidate.selector = ancestorResult.selector;
         candidate.type = "xpath";
-        candidate.matchCount = ancestorResult.count;
-        candidate.unique = true;
-        candidate.uniqueInContext = true;
         candidate.relation = candidate.relation || "global";
-        reasonParts.push("\uC0C1\uC704 class + \uD14D\uC2A4\uD2B8 \uC870\uD569");
+        if (ancestorResult.reason) {
+          reasonParts.push(ancestorResult.reason);
+        } else {
+          reasonParts.push("\uD14D\uC2A4\uD2B8 \uC870\uD569");
+        }
       }
     }
     if (!candidate.unique && options.element) {
@@ -914,9 +963,6 @@
         if (simpleDerived) {
           candidate.selector = simpleDerived.selector;
           candidate.type = "css";
-          candidate.matchCount = simpleDerived.count;
-          candidate.unique = true;
-          candidate.uniqueInContext = true;
           candidate.relation = options.contextElement ? "relative" : candidate.relation || "global";
           reasonParts.push("\uBD80\uBAA8 \uD0DC\uADF8 \uACBD\uB85C \uC870\uD569");
         } else {
@@ -924,9 +970,6 @@
           if (derived) {
             candidate.selector = derived.selector;
             candidate.type = "css";
-            candidate.matchCount = derived.count;
-            candidate.unique = true;
-            candidate.uniqueInContext = true;
             candidate.relation = options.contextElement ? "relative" : candidate.relation || "global";
             reasonParts.push("\uC0C1\uC704 class \uACBD\uB85C \uC870\uD569");
           }
@@ -938,16 +981,32 @@
       const uniqueSelector = buildUniqueCssPath(options.element, contextEl);
       if (uniqueSelector && uniqueSelector !== candidate.selector) {
         const uniqueParsed = parseSelectorForMatching(uniqueSelector, "css");
-        const count = countMatchesForSelector(uniqueParsed, contextEl || document, { matchMode: candidate.matchMode });
+        const count = countMatchesForSelector(uniqueParsed, contextEl || document, { matchMode: candidate.matchMode, maxCount: 2 });
         if (count === 1) {
           candidate.selector = uniqueSelector;
           candidate.type = "css";
-          candidate.matchCount = count;
-          candidate.unique = true;
-          candidate.uniqueInContext = true;
           candidate.relation = contextEl ? "relative" : candidate.relation;
           reasonParts.push("\uACBD\uB85C \uC778\uB371\uC2F1 \uC801\uC6A9");
         }
+      }
+    }
+    if (!candidate.unique) {
+      const verificationParsed = parseSelectorForMatching(candidate.selector, candidate.type || inferSelectorType(candidate.selector));
+      const verificationCount = countMatchesForSelector(
+        verificationParsed,
+        options.contextElement || document,
+        { matchMode: candidate.matchMode, maxCount: 4 }
+      );
+      candidate.matchCount = verificationCount;
+      candidate.unique = verificationCount === 1;
+      candidate.uniqueInContext = verificationCount === 1;
+      reasonParts = reasonParts.filter((part) => !/유일 일치|개 요소와 일치/.test(part));
+      if (verificationCount === 1) {
+        reasonParts.push("\uC720\uC77C \uC77C\uCE58");
+      } else if (verificationCount === 2) {
+        reasonParts.push("2\uAC1C \uC694\uC18C\uC640 \uC77C\uCE58 (\uCD94\uAC00 \uC870\uD569)");
+      } else if (verificationCount > 2) {
+        reasonParts.push(`${verificationCount}\uAC1C \uC694\uC18C\uC640 \uC77C\uCE58`);
       }
     }
     candidate.reason = reasonParts.join(" \u2022 ");
@@ -1028,12 +1087,12 @@
     const registry = createCandidateRegistry();
     try {
       buildAttributeSelectors(element).forEach((cand) => {
-        addCandidate(registry, cand, { duplicateScore: 62, element });
+        addCandidate(registry, cand, { duplicateScore: 62, element, maxMatchSample: 5 });
       });
     } catch (e) {
     }
     generateClassSelectors(element).forEach((cand) => {
-      addCandidate(registry, cand, { duplicateScore: 58, element });
+      addCandidate(registry, cand, { duplicateScore: 58, element, maxMatchSample: 5 });
     });
     const rawText = (element.innerText || element.textContent || "").trim().split("\n").map((t) => t.trim()).filter(Boolean)[0];
     if (rawText) {
@@ -1052,7 +1111,7 @@
       addCandidate(
         registry,
         { type: "xpath", selector: `xpath=${robustXPath}`, score: 58, reason: "\uC18D\uC131 \uAE30\uBC18 XPath", xpathValue: robustXPath },
-        { duplicateScore: 52, element }
+        { duplicateScore: 52, element, maxMatchSample: 5 }
       );
     }
     const fullXPath = buildFullXPath(element);
@@ -1060,13 +1119,13 @@
       addCandidate(
         registry,
         { type: "xpath-full", selector: `xpath=${fullXPath}`, score: 42, reason: "Full XPath (\uC808\uB300 \uACBD\uB85C)", xpathValue: fullXPath },
-        { duplicateScore: 36, element, enableIndexing: false }
+        { duplicateScore: 36, element, enableIndexing: false, maxMatchSample: 5 }
       );
     }
     addCandidate(
       registry,
       { type: "tag", selector: element.tagName.toLowerCase(), score: DEFAULT_TAG_SCORE, reason: "\uD0DC\uADF8 \uC774\uB984" },
-      { duplicateScore: 28, allowZero: true, element }
+      { duplicateScore: 28, allowZero: true, element, maxMatchSample: 5 }
     );
     const firstNthCandidate = buildFirstNthOfTypeSelector(element);
     if (firstNthCandidate) {

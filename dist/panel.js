@@ -25,8 +25,10 @@ const aiApiKeyInput = document.getElementById('ai-api-key');
 const aiModelInput = document.getElementById('ai-model');
 const aiSettingsSaveBtn = document.getElementById('ai-settings-save');
 const aiSettingsStatusEl = document.getElementById('ai-settings-status');
+const aiReviewBtnWrapper = document.getElementById('ai-review-btn-wrapper');
 const aiReviewBtn = document.getElementById('ai-review-btn');
 const aiReviewStatusEl = document.getElementById('ai-review-status');
+const aiReviewHelpEl = document.getElementById('ai-review-help');
 const codeReviewSummaryEl = document.getElementById('code-review-summary');
 const codeReviewDiffEl = document.getElementById('code-review-diff');
 let recording = false;
@@ -53,6 +55,62 @@ const NAVIGATION_RECOVERY_DELAY_MS = 800;
 const DOM_COMPLETE_DELAY_MS = 250;
 const MAX_NAVIGATION_WAIT_MS = 15000;
 const EVENT_SCHEMA_VERSION = 2;
+let codeEditor = null;
+
+function getCodeText() {
+  if (codeEditor) {
+    return codeEditor.getValue();
+  }
+  return codeOutput ? codeOutput.value || '' : '';
+}
+
+function setCodeText(text) {
+  const next = text || '';
+  if (codeEditor && codeEditor.getValue() !== next) {
+    const cursor = codeEditor.getCursor();
+    codeEditor.setValue(next);
+    if (cursor) {
+      const totalLines = Math.max(codeEditor.lineCount() - 1, 0);
+      codeEditor.setCursor({ line: Math.min(cursor.line, totalLines), ch: cursor.ch });
+    }
+  }
+  if (codeOutput && codeOutput.value !== next) {
+    codeOutput.value = next;
+  }
+}
+
+function getCodeMirrorMode(language) {
+  const lang = language || selectedLanguage || 'javascript';
+  if (lang === 'python' || lang === 'python-class') {
+    return 'text/x-python';
+  }
+  if (lang === 'typescript') {
+    return 'text/typescript';
+  }
+  return 'text/javascript';
+}
+
+function refreshCodeEditorMode() {
+  if (codeEditor) {
+    codeEditor.setOption('mode', getCodeMirrorMode(selectedLanguage));
+  }
+}
+
+function initCodeEditor() {
+  if (!codeOutput || typeof CodeMirror !== 'function') return;
+  codeEditor = CodeMirror.fromTextArea(codeOutput, {
+    lineNumbers: true,
+    theme: 'neo'
+  });
+  refreshCodeEditorMode();
+  codeEditor.setSize('100%', 'auto');
+  codeEditor.on('change', () => {
+    codeOutput.value = codeEditor.getValue();
+  });
+  codeEditor.refresh();
+}
+
+initCodeEditor();
 
 function normalizeEventRecord(event) {
   if (!event || typeof event !== 'object') return event;
@@ -327,6 +385,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (aiReviewBtn) {
     aiReviewBtn.disabled = !isAiConfigured() || aiCodeReviewState.status === 'loading';
   }
+  updateAiReviewTooltip();
   setAiReviewStatus(aiCodeReviewState.status || 'idle', aiReviewStatusEl ? aiReviewStatusEl.textContent : '');
 });
 
@@ -334,6 +393,7 @@ loadAiSettingsFromStorage();
 if (aiReviewBtn) {
   aiReviewBtn.disabled = !isAiConfigured();
 }
+updateAiReviewTooltip();
 
 function setAiReviewStatus(status, message) {
   if (!aiReviewStatusEl) return;
@@ -344,6 +404,7 @@ function setAiReviewStatus(status, message) {
     if (aiReviewBtn) {
       aiReviewBtn.disabled = true;
     }
+    updateAiReviewTooltip();
     return;
   }
   if (status === 'loading') {
@@ -362,6 +423,7 @@ function setAiReviewStatus(status, message) {
     aiReviewStatusEl.textContent = message || '';
   }
   aiCodeReviewState.status = status;
+  updateAiReviewTooltip();
 }
 
 function toggleAiReviewLoading(loading) {
@@ -369,6 +431,31 @@ function toggleAiReviewLoading(loading) {
   const disabled = !!loading || !isAiConfigured();
   aiReviewBtn.disabled = disabled;
   aiReviewBtn.classList.toggle('loading', !!loading);
+  updateAiReviewTooltip();
+}
+
+function getAiReviewTooltipText() {
+  if (!isAiConfigured()) {
+    return 'AI API를 설정하면 현재 테스트 케이스와 생성된 코드를 AI에 보내 개선 제안과 수정본을 받을 수 있습니다.';
+  }
+  if (aiCodeReviewState.status === 'loading') {
+    return 'AI가 생성된 코드와 테스트 케이스를 검토 중입니다. 잠시만 기다려 주세요.';
+  }
+  return 'AI 검토는 테스트 케이스와 생성된 코드를 AI에 전달해 개선 제안과 수정본을 받아 자동으로 적용합니다.';
+}
+
+function updateAiReviewTooltip() {
+  if (!aiReviewHelpEl) return;
+  const text = getAiReviewTooltipText();
+  aiReviewHelpEl.setAttribute('data-tooltip', text);
+  aiReviewHelpEl.setAttribute('aria-label', text);
+  aiReviewHelpEl.setAttribute('title', text);
+  if (aiReviewBtnWrapper) {
+    const buttonTooltip = !isAiConfigured()
+      ? 'AI 검토를 사용하려면 AI API 설정을 먼저 완료하세요.'
+      : '';
+    aiReviewBtnWrapper.setAttribute('data-tooltip', buttonTooltip);
+  }
 }
 
 function clearCodeReviewArtifacts(options = {}) {
@@ -563,11 +650,11 @@ function normalizeCodeReviewResponse(response) {
 }
 
 function requestAiCodeReview() {
-  if (!codeOutput) {
+  if (!codeOutput && !codeEditor) {
     setAiReviewStatus('error', '코드 프리뷰 영역을 찾을 수 없습니다.');
     return;
   }
-  const originalCode = codeOutput.value || '';
+  const originalCode = getCodeText();
   if (!originalCode.trim()) {
     setAiReviewStatus('info', '생성된 코드가 없습니다. 이벤트를 먼저 기록하세요.');
     return;
@@ -602,7 +689,7 @@ function requestAiCodeReview() {
     }
     const { updatedCode, summary, suggestions } = normalized;
     if (typeof updatedCode === 'string' && updatedCode.trim() && updatedCode !== originalCode) {
-      codeOutput.value = updatedCode;
+      setCodeText(updatedCode);
       renderCodeDiff(originalCode, updatedCode);
       renderCodeReviewSummary(summary, suggestions);
       setAiReviewStatus('success', 'AI 검토 결과를 코드에 적용했습니다.');
@@ -728,7 +815,7 @@ function triggerStartRecording(options = {}, callback) {
       allEvents = [];
       timeline.innerHTML = '';
       selectorList.innerHTML = '';
-      if (codeOutput) codeOutput.value = '';
+      setCodeText('');
       logEntries.innerHTML = '';
       currentEventIndex = -1;
       listenEvents();
@@ -833,6 +920,7 @@ function populateLanguageOptions(framework, options = {}) {
   if (nextValue) {
     languageSelect.value = nextValue;
     selectedLanguage = nextValue;
+    refreshCodeEditorMode();
   }
 }
 
@@ -854,6 +942,7 @@ if (frameworkSelect) {
 if (languageSelect) {
   languageSelect.addEventListener('change', (e) => {
     selectedLanguage = e.target.value;
+    refreshCodeEditorMode();
     updateCode({ preloadedEvents: allEvents }); // 실시간 코드 업데이트
     updateSelectionCodePreview();
   });
@@ -880,7 +969,7 @@ resetBtn.addEventListener('click', () => {
     allEvents = [];
     timeline.innerHTML = '';
     selectorList.innerHTML = '';
-    if (codeOutput) codeOutput.value = '';
+    setCodeText('');
     logEntries.innerHTML = '';
     currentEventIndex = -1;
     // 모든 탭에 녹화 중지 메시지 전송
@@ -3081,9 +3170,7 @@ function updateCode(options = {}) {
 
     loadManualActions(() => {
       const code = generateCode(normalizedEvents, manualActions, selectedFramework, selectedLanguage);
-      if (codeOutput) {
-        codeOutput.value = code;
-      }
+      setCodeText(code);
       updateSelectionCodePreview();
     });
   };
