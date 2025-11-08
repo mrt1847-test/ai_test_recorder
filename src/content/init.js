@@ -8,7 +8,7 @@ const GLOBAL_FLAG = '__ai_test_recorder_loaded';
 function restoreRecordingState() {
   chrome.storage.local.get(['recording'], (result) => {
     if (result.recording) {
-      startRecording();
+      startRecording({ resetEvents: false });
     } else {
       ensureRecordingState(false);
       removeHighlight();

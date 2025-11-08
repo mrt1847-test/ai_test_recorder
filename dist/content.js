@@ -290,10 +290,216 @@
       return 0;
     }
   }
+  var CONTEXT_ATTRIBUTE_KEYS = [
+    "data-testid",
+    "data-test",
+    "data-qa",
+    "data-cy",
+    "data-id",
+    "aria-label",
+    "role",
+    "name",
+    "type",
+    "alt",
+    "title"
+  ];
+  function pickContextAttributes(element) {
+    const attrs = {};
+    CONTEXT_ATTRIBUTE_KEYS.forEach((key) => {
+      const value = element.getAttribute && element.getAttribute(key);
+      if (value) {
+        attrs[key] = value;
+      }
+    });
+    return attrs;
+  }
+  function getElementPositionInfo(element) {
+    const parent = element.parentElement;
+    let index = 0;
+    let nthOfType = 0;
+    let total = 1;
+    if (parent) {
+      const children = Array.from(parent.children || []);
+      total = children.length;
+      index = children.indexOf(element);
+      nthOfType = children.slice(0, index + 1).filter((el) => el.tagName === element.tagName).length;
+    } else {
+      nthOfType = 1;
+    }
+    return {
+      index,
+      total,
+      nthOfType
+    };
+  }
+  function summarizeElementForContext(element) {
+    if (!element || element.nodeType !== 1) return null;
+    const summary = {
+      tag: element.tagName ? element.tagName.toLowerCase() : ""
+    };
+    if (element.id) {
+      summary.id = element.id;
+    }
+    const classes = Array.from(element.classList || []).slice(0, 5);
+    if (classes.length) {
+      summary.classes = classes;
+    }
+    const attrs = pickContextAttributes(element);
+    if (Object.keys(attrs).length > 0) {
+      summary.attributes = attrs;
+    }
+    const rawText = normalizeText((element.innerText || element.textContent || "").trim());
+    if (rawText) {
+      summary.text = rawText.length > 80 ? `${rawText.slice(0, 77)}\u2026` : rawText;
+    }
+    summary.childCount = element.children ? element.children.length : 0;
+    summary.position = getElementPositionInfo(element);
+    return summary;
+  }
+  function buildDomContextSnapshot(element, options = {}) {
+    if (!element || element.nodeType !== 1) {
+      return {
+        ancestors: [],
+        children: []
+      };
+    }
+    const {
+      maxAncestors = 4,
+      maxChildren = 6,
+      includeSelf = false
+    } = options;
+    const ancestors = [];
+    let current = element.parentElement;
+    while (current && ancestors.length < maxAncestors) {
+      const summary = summarizeElementForContext(current);
+      if (summary) {
+        ancestors.push(summary);
+      }
+      current = current.parentElement;
+    }
+    const children = [];
+    const childElements = Array.from(element.children || []);
+    childElements.slice(0, maxChildren).forEach((child) => {
+      const summary = summarizeElementForContext(child);
+      if (summary) {
+        children.push(summary);
+      }
+    });
+    return {
+      self: includeSelf ? summarizeElementForContext(element) : void 0,
+      ancestors,
+      children
+    };
+  }
 
   // src/content/selectors/index.js
   var DEFAULT_TEXT_SCORE = 65;
   var DEFAULT_TAG_SCORE = 20;
+  var UNIQUE_MATCH_BONUS = 6;
+  var DUPLICATE_PENALTY_STEP = 6;
+  var CLASS_COMBINATION_LIMIT = 2;
+  var ATTRIBUTE_PRIORITY = [
+    { attr: "id", type: "id", score: 90, reason: "id \uC18D\uC131", allowPartial: false },
+    { attr: "data-testid", type: "data-testid", score: 88, reason: "data-testid \uC18D\uC131", allowPartial: true },
+    { attr: "data-test", type: "data-test", score: 86, reason: "data-test \uC18D\uC131", allowPartial: true },
+    { attr: "data-qa", type: "data-qa", score: 84, reason: "data-qa \uC18D\uC131", allowPartial: true },
+    { attr: "data-cy", type: "data-cy", score: 84, reason: "data-cy \uC18D\uC131", allowPartial: true },
+    { attr: "data-id", type: "data-id", score: 82, reason: "data-id \uC18D\uC131", allowPartial: true },
+    { attr: "aria-label", type: "aria-label", score: 80, reason: "aria-label \uC18D\uC131", allowPartial: true },
+    { attr: "role", type: "role", score: 78, reason: "role \uC18D\uC131", allowPartial: false },
+    { attr: "name", type: "name", score: 78, reason: "name \uC18D\uC131", allowPartial: false },
+    { attr: "title", type: "title", score: 72, reason: "title \uC18D\uC131", allowPartial: true },
+    { attr: "type", type: "type", score: 68, reason: "type \uC18D\uC131", allowPartial: false }
+  ];
+  function buildAttributeSelectors(element) {
+    const results = [];
+    for (const meta of ATTRIBUTE_PRIORITY) {
+      const rawValue = element.getAttribute && element.getAttribute(meta.attr);
+      if (!rawValue) continue;
+      if (meta.attr === "id") {
+        results.push({
+          type: "id",
+          selector: `#${cssEscapeIdent(rawValue)}`,
+          score: meta.score,
+          reason: meta.reason
+        });
+        continue;
+      }
+      const escaped = escapeAttributeValue(rawValue);
+      results.push({
+        type: meta.type,
+        selector: `[${meta.attr}="${escaped}"]`,
+        score: meta.score,
+        reason: meta.reason
+      });
+      if (meta.allowPartial) {
+        const tokens = rawValue.split(/[\s,;]+/).filter((token) => token.length > 2);
+        tokens.slice(0, 2).forEach((token, index) => {
+          const escapedToken = escapeAttributeValue(token);
+          results.push({
+            type: `${meta.type}-partial`,
+            selector: `[${meta.attr}*="${escapedToken}"]`,
+            score: Math.max(meta.score - 8 - index * 2, 60),
+            reason: `${meta.reason} \uBD80\uBD84 \uC77C\uCE58`,
+            matchMode: "contains"
+          });
+        });
+      }
+    }
+    return results;
+  }
+  function generateClassSelectors(element) {
+    const classList = Array.from(element.classList || []).filter(Boolean);
+    if (classList.length === 0) return [];
+    const escaped = classList.map((cls) => cssEscapeIdent(cls));
+    const combinations = /* @__PURE__ */ new Set();
+    function backtrack(start, depth, current) {
+      if (current.length > 0 && current.length <= CLASS_COMBINATION_LIMIT) {
+        const key = current.join(".");
+        combinations.add(key);
+      }
+      if (current.length === CLASS_COMBINATION_LIMIT) return;
+      for (let i = start; i < escaped.length; i += 1) {
+        current.push(escaped[i]);
+        backtrack(i + 1, depth + 1, current);
+        current.pop();
+      }
+    }
+    backtrack(0, 0, []);
+    const results = [];
+    const ordered = Array.from(combinations).sort((a, b) => {
+      const lenDiff = a.split(".").length - b.split(".").length;
+      if (lenDiff !== 0) return lenDiff;
+      return a.localeCompare(b);
+    });
+    ordered.slice(0, 12).forEach((key) => {
+      const classSelector = `.${key}`;
+      results.push({
+        type: "class",
+        selector: classSelector,
+        score: 62 - Math.min(10, key.split(".").length * 2),
+        reason: "class \uC870\uD569"
+      });
+      results.push({
+        type: "class-tag",
+        selector: `${element.tagName.toLowerCase()}${classSelector}`,
+        score: 68 - Math.min(10, key.split(".").length),
+        reason: "\uD0DC\uADF8 + class \uC870\uD569"
+      });
+    });
+    return results;
+  }
+  function sortCandidates(candidates) {
+    return candidates.slice().sort((a, b) => {
+      const uniqueA = a.unique ? 1 : 0;
+      const uniqueB = b.unique ? 1 : 0;
+      if (uniqueA !== uniqueB) return uniqueB - uniqueA;
+      const relationA = a.relation === "relative" ? 1 : 0;
+      const relationB = b.relation === "relative" ? 1 : 0;
+      if (relationA !== relationB) return relationB - relationA;
+      return (b.score || 0) - (a.score || 0);
+    });
+  }
   function getIframeContext(target) {
     try {
       const win = target && target.ownerDocument && target.ownerDocument.defaultView;
@@ -376,7 +582,17 @@
       }
     }
     candidate.reason = reasonParts.join(" \u2022 ");
-    return candidate;
+    if (typeof candidate.score === "number") {
+      if (candidate.unique) {
+        candidate.score = Math.min(100, candidate.score + UNIQUE_MATCH_BONUS);
+      } else if (candidate.matchCount > 1) {
+        candidate.score = Math.max(
+          10,
+          candidate.score - Math.min(24, (candidate.matchCount - 1) * DUPLICATE_PENALTY_STEP)
+        );
+      }
+    }
+    return applyFragilityAdjustments(candidate);
   }
   function createCandidateRegistry() {
     const results = [];
@@ -395,46 +611,59 @@
       }
     };
   }
+  function applyFragilityAdjustments(candidate) {
+    if (!candidate || typeof candidate.score !== "number") {
+      return candidate;
+    }
+    const selector = candidate.selector || "";
+    const inferredType = candidate.type || inferSelectorType(selector);
+    let penalty = 0;
+    const flags = [];
+    if (inferredType === "xpath-full" || /xpath=\/html/i.test(selector)) {
+      penalty += 18;
+      flags.push("\uC808\uB300 XPath");
+    } else if ((inferredType === "xpath" || inferredType === "xpath-full") && /\/\d+\]/.test(selector) && !/@/.test(selector)) {
+      penalty += 8;
+      flags.push("\uAD6C\uC870 \uC758\uC874 XPath");
+    }
+    if ((inferredType === "css" || inferredType === "class" || inferredType === "class-tag" || inferredType === "id") && /:nth-(child|of-type)\(/i.test(selector)) {
+      penalty += 8;
+      flags.push("nth-of-type \uC0AC\uC6A9");
+    }
+    if (inferredType === "class" || inferredType === "class-tag") {
+      const classCount = (selector.match(/\./g) || []).length;
+      if (classCount > 2) {
+        penalty += (classCount - 2) * 4;
+        flags.push("\uACFC\uB3C4\uD55C class \uC870\uD569");
+      }
+    }
+    if (penalty > 0) {
+      candidate.score = Math.max(5, candidate.score - penalty);
+      if (flags.length) {
+        const fragility = `\uCDE8\uC57D \uC694\uC18C (${flags.join(", ")})`;
+        candidate.reason = candidate.reason ? `${candidate.reason} \u2022 ${fragility}` : fragility;
+      }
+    }
+    return candidate;
+  }
+  function addCandidate(registry, candidate, options = {}) {
+    const enriched = enrichCandidateWithUniqueness(candidate, options);
+    if (enriched) {
+      registry.add(enriched);
+    }
+  }
   function getSelectorCandidates(element) {
     if (!element) return [];
     const registry = createCandidateRegistry();
     try {
-      if (element.id) {
-        registry.add(
-          enrichCandidateWithUniqueness(
-            { type: "id", selector: `#${element.id}`, score: 90, reason: "id \uC18D\uC131" },
-            { duplicateScore: 60, element }
-          )
-        );
-      }
-      if (element.dataset && element.dataset.testid) {
-        registry.add(
-          enrichCandidateWithUniqueness(
-            { type: "data-testid", selector: `[data-testid="${element.dataset.testid}"]`, score: 85, reason: "data-testid \uC18D\uC131" },
-            { duplicateScore: 70, element }
-          )
-        );
-      }
-      const nameAttr = element.getAttribute && element.getAttribute("name");
-      if (nameAttr) {
-        registry.add(
-          enrichCandidateWithUniqueness(
-            { type: "name", selector: `[name="${nameAttr}"]`, score: 80, reason: "name \uC18D\uC131" },
-            { duplicateScore: 65, element }
-          )
-        );
-      }
+      buildAttributeSelectors(element).forEach((cand) => {
+        addCandidate(registry, cand, { duplicateScore: 62, element });
+      });
     } catch (e) {
     }
-    if (element.classList && element.classList.length) {
-      const cls = Array.from(element.classList).slice(0, 3).join(".");
-      registry.add(
-        enrichCandidateWithUniqueness(
-          { type: "class", selector: `.${cls}`, score: 60, reason: "class \uC870\uD569" },
-          { duplicateScore: 55, element }
-        )
-      );
-    }
+    generateClassSelectors(element).forEach((cand) => {
+      addCandidate(registry, cand, { duplicateScore: 58, element });
+    });
     const rawText = (element.innerText || element.textContent || "").trim().split("\n").map((t) => t.trim()).filter(Boolean)[0];
     if (rawText) {
       const truncatedText = rawText.slice(0, 60);
@@ -449,55 +678,50 @@
     }
     const robustXPath = buildRobustXPath(element);
     if (robustXPath) {
-      registry.add(
-        enrichCandidateWithUniqueness(
-          { type: "xpath", selector: `xpath=${robustXPath}`, score: 60, reason: "\uC18D\uC131 \uAE30\uBC18 XPath", xpathValue: robustXPath },
-          { duplicateScore: 55, element }
-        )
+      addCandidate(
+        registry,
+        { type: "xpath", selector: `xpath=${robustXPath}`, score: 58, reason: "\uC18D\uC131 \uAE30\uBC18 XPath", xpathValue: robustXPath },
+        { duplicateScore: 52, element }
       );
     }
     const fullXPath = buildFullXPath(element);
     if (fullXPath) {
-      registry.add(
-        enrichCandidateWithUniqueness(
-          { type: "xpath", selector: `xpath=${fullXPath}`, score: 45, reason: "Full XPath (\uC808\uB300 \uACBD\uB85C)", xpathValue: fullXPath },
-          { duplicateScore: 40, element, enableIndexing: false }
-        )
+      addCandidate(
+        registry,
+        { type: "xpath-full", selector: `xpath=${fullXPath}`, score: 42, reason: "Full XPath (\uC808\uB300 \uACBD\uB85C)", xpathValue: fullXPath },
+        { duplicateScore: 36, element, enableIndexing: false }
       );
     }
-    registry.add(
-      enrichCandidateWithUniqueness(
-        { type: "tag", selector: element.tagName.toLowerCase(), score: DEFAULT_TAG_SCORE, reason: "\uD0DC\uADF8 \uC774\uB984" },
-        { duplicateScore: 30, allowZero: true, element }
-      )
+    addCandidate(
+      registry,
+      { type: "tag", selector: element.tagName.toLowerCase(), score: DEFAULT_TAG_SCORE, reason: "\uD0DC\uADF8 \uC774\uB984" },
+      { duplicateScore: 28, allowZero: true, element }
     );
-    return registry.list();
+    return sortCandidates(registry.list());
   }
   function getChildSelectorCandidates(parent, child) {
     if (!parent || !child) return [];
     const registry = createCandidateRegistry();
     const relativeCss = buildRelativeCssSelector(parent, child);
     if (relativeCss) {
-      registry.add(
-        enrichCandidateWithUniqueness(
-          { type: "css", selector: `css=${relativeCss}`, score: 88, reason: "\uBD80\uBAA8 \uC694\uC18C \uAE30\uC900 CSS \uACBD\uB85C", relation: "relative" },
-          { skipGlobalCheck: true, contextElement: parent, contextLabel: "\uBD80\uBAA8", duplicateScore: 70, element: child }
-        )
+      addCandidate(
+        registry,
+        { type: "css", selector: `css=${relativeCss}`, score: 90, reason: "\uBD80\uBAA8 \uAE30\uC900 CSS \uACBD\uB85C", relation: "relative" },
+        { skipGlobalCheck: true, contextElement: parent, contextLabel: "\uBD80\uBAA8", duplicateScore: 68, element: child }
       );
     }
     const relativeXPath = buildRelativeXPathSelector(parent, child);
     if (relativeXPath) {
-      registry.add(
-        enrichCandidateWithUniqueness(
-          { type: "xpath", selector: `xpath=${relativeXPath}`, score: 85, reason: "\uBD80\uBAA8 \uC694\uC18C \uAE30\uC900 XPath \uACBD\uB85C", relation: "relative", xpathValue: relativeXPath },
-          { skipGlobalCheck: true, contextElement: parent, contextLabel: "\uBD80\uBAA8", duplicateScore: 68, element: child }
-        )
+      addCandidate(
+        registry,
+        { type: "xpath", selector: `xpath=${relativeXPath}`, score: 86, reason: "\uBD80\uBAA8 \uAE30\uC900 XPath \uACBD\uB85C", relation: "relative", xpathValue: relativeXPath },
+        { skipGlobalCheck: true, contextElement: parent, contextLabel: "\uBD80\uBAA8", duplicateScore: 66, element: child }
       );
     }
     (getSelectorCandidates(child) || []).forEach((cand) => {
       registry.add({ ...cand, relation: cand.relation || "global" });
     });
-    return registry.list();
+    return sortCandidates(registry.list());
   }
   function getParentSelectorCandidates(child, parent) {
     if (!child || !parent) return [];
@@ -506,11 +730,17 @@
     let depth = 1;
     while (current && current.nodeType === 1) {
       const steps = Array(depth).fill("..").join("/");
-      registry.add(
-        enrichCandidateWithUniqueness(
-          { type: "xpath", selector: `xpath=${steps}`, score: Math.max(70, 82 - (depth - 1) * 5), reason: depth === 1 ? "\uC9C1\uC811 \uC0C1\uC704 \uC694\uC18C" : `${depth}\uB2E8\uACC4 \uC0C1\uC704 \uC694\uC18C`, relation: "relative", xpathValue: steps },
-          { skipGlobalCheck: true, contextElement: child, contextLabel: "\uD604\uC7AC \uC694\uC18C", duplicateScore: Math.max(60, 70 - (depth - 1) * 5), element: current }
-        )
+      addCandidate(
+        registry,
+        {
+          type: "xpath",
+          selector: `xpath=${steps}`,
+          score: Math.max(72, 86 - (depth - 1) * 5),
+          reason: depth === 1 ? "\uC9C1\uC811 \uC0C1\uC704 \uC694\uC18C" : `${depth}\uB2E8\uACC4 \uC0C1\uC704 \uC694\uC18C`,
+          relation: "relative",
+          xpathValue: steps
+        },
+        { skipGlobalCheck: true, contextElement: child, contextLabel: "\uD604\uC7AC \uC694\uC18C", duplicateScore: Math.max(58, 68 - (depth - 1) * 5), element: current }
       );
       if (!current.parentElement || current === document.documentElement) {
         break;
@@ -521,7 +751,7 @@
     (getSelectorCandidates(parent) || []).forEach((cand) => {
       registry.add({ ...cand, relation: cand.relation || "global" });
     });
-    return registry.list();
+    return sortCandidates(registry.list());
   }
   function collectSelectorInfos(eventRecord) {
     const infos = [];
@@ -861,6 +1091,8 @@
     handle: null,
     buttons: {},
     status: null,
+    closeButton: null,
+    visible: false,
     dragging: false,
     dragOffsetX: 0,
     dragOffsetY: 0
@@ -989,7 +1221,6 @@
     container.style.minWidth = "200px";
     container.style.userSelect = "none";
     const handle = document.createElement("div");
-    handle.textContent = "Recorder Controls";
     handle.style.display = "flex";
     handle.style.alignItems = "center";
     handle.style.justifyContent = "space-between";
@@ -999,6 +1230,30 @@
     handle.style.letterSpacing = "0.08em";
     handle.style.marginBottom = "10px";
     handle.style.cursor = "move";
+    const handleTitle = document.createElement("span");
+    handleTitle.textContent = "Recorder Controls";
+    handleTitle.style.flex = "1 1 auto";
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.textContent = "x";
+    closeBtn.setAttribute("aria-label", "\uC624\uBC84\uB808\uC774 \uB2EB\uAE30");
+    closeBtn.style.cssText = "margin-left:8px;flex:0 0 auto;width:20px;height:20px;border:none;border-radius:4px;background:transparent;color:rgba(255,255,255,0.7);font-size:12px;line-height:1;cursor:pointer;padding:0;";
+    closeBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      setOverlayVisibility(false);
+    });
+    closeBtn.addEventListener("mousedown", (event) => {
+      event.stopPropagation();
+    });
+    closeBtn.addEventListener("mouseenter", () => {
+      closeBtn.style.background = "rgba(255,255,255,0.15)";
+    });
+    closeBtn.addEventListener("mouseleave", () => {
+      closeBtn.style.background = "transparent";
+    });
+    handle.appendChild(handleTitle);
+    handle.appendChild(closeBtn);
     const buttonsRow = document.createElement("div");
     buttonsRow.style.display = "flex";
     buttonsRow.style.gap = "8px";
@@ -1047,10 +1302,42 @@
     overlayControlsState.handle = handle;
     overlayControlsState.buttons = { start: startBtn, stop: stopBtn, select: selectBtn };
     overlayControlsState.status = status;
+    overlayControlsState.closeButton = closeBtn;
+    overlayControlsState.visible = false;
+    container.style.display = "none";
     document.body.appendChild(container);
     restoreOverlayPosition(container);
     updateOverlayControlsState();
     setOverlayStatus("", "info");
+  }
+  function isOverlayVisible() {
+    return !!overlayControlsState.visible;
+  }
+  function setOverlayVisibility(visible, options = {}) {
+    if (window !== window.top) return false;
+    if (!overlayControlsState.container) {
+      createOverlayControls();
+    }
+    const container = overlayControlsState.container;
+    if (!container) return false;
+    const target = !!visible;
+    const changed = overlayControlsState.visible !== target;
+    overlayControlsState.visible = target;
+    if (target) {
+      container.style.display = "block";
+      updateOverlayControlsState();
+    } else {
+      stopOverlayDrag();
+      container.style.display = "none";
+      setOverlayStatus("", "info");
+    }
+    if (changed) {
+      chrome.storage.local.set({ overlayVisible: target });
+    }
+    if (changed && options.notify !== false) {
+      chrome.runtime.sendMessage({ type: "OVERLAY_VISIBILITY_CHANGED", visible: target });
+    }
+    return changed;
   }
   function buildOverlayHtml(topSelector, selectors) {
     if (!topSelector) {
@@ -1192,7 +1479,8 @@
         element: {
           tag: element.tagName,
           id: element.id || null,
-          classes: Array.from(element.classList || [])
+          classes: Array.from(element.classList || []),
+          domContext: buildDomContextSnapshot(element)
         }
       });
     }
@@ -1255,6 +1543,10 @@
   }
   function initOverlaySystem() {
     createOverlayControls();
+    chrome.storage.local.get({ overlayVisible: false }, (data) => {
+      const storedVisible = !!data.overlayVisible;
+      setOverlayVisibility(storedVisible, { notify: false });
+    });
     document.addEventListener("mouseover", handleMouseOver, true);
     document.addEventListener("mouseout", handleMouseOut, true);
     window.addEventListener("scroll", handleScroll, true);
@@ -1306,7 +1598,8 @@
       text: (element.innerText || element.textContent || "").trim().slice(0, 80),
       id: element.id || null,
       classList: Array.from(element.classList || []),
-      iframeContext: getIframeContext(element)
+      iframeContext: getIframeContext(element),
+      domContext: buildDomContextSnapshot(element)
     };
   }
   function handleRootSelection(target) {
@@ -1443,6 +1736,7 @@
     value = null,
     selectors = [],
     target = null,
+    domContext = null,
     iframeContext = null,
     clientRect = null,
     metadata = {},
@@ -1471,7 +1765,8 @@
         tag: targetTag,
         id: target.id || null,
         classes: target.classList ? Array.from(target.classList) : [],
-        text: (target.innerText || target.textContent || "").trim().slice(0, 200)
+        text: (target.innerText || target.textContent || "").trim().slice(0, 200),
+        domContext
       } : null,
       clientRect,
       metadata: {
@@ -1511,6 +1806,7 @@
     const iframeContext = getIframeContext(target);
     const clientRect = buildClientRect(target);
     const metadata = { domEvent: action };
+    const domContext = buildDomContextSnapshot(target);
     const eventRecord = createEventRecord({
       action,
       value,
@@ -1518,12 +1814,14 @@
       target,
       iframeContext,
       clientRect,
-      metadata
+      metadata,
+      domContext
     });
     return {
       ...eventRecord,
       selectorCandidates: selectors,
       iframeContext,
+      domContext,
       tag: target && target.tagName ? target.tagName : null
     };
   }
@@ -1572,10 +1870,24 @@
       recordDomEvent({ action: "input", target, value: target.value || target.textContent || "" });
     }
   }
-  function startRecording() {
+  function startRecording(options = {}) {
+    const { resetEvents = true } = options;
+    if (recorderState.isRecording) {
+      ensureRecordingState(true);
+      if (resetEvents) {
+        chrome.storage.local.set({ events: [], recording: true });
+      } else {
+        chrome.storage.local.set({ recording: true });
+      }
+      return;
+    }
     recorderState.isRecording = true;
     ensureRecordingState(true);
-    chrome.storage.local.set({ events: [], recording: true });
+    if (resetEvents) {
+      chrome.storage.local.set({ events: [], recording: true });
+    } else {
+      chrome.storage.local.set({ recording: true });
+    }
     removeHighlight();
   }
   function stopRecording() {
@@ -1625,7 +1937,7 @@
             return;
           }
           case "RECORDING_START": {
-            startRecording();
+            startRecording({ resetEvents: true });
             sendResponse({ ok: true });
             return;
           }
@@ -1676,6 +1988,47 @@
             sendResponse({ ok: true });
             return;
           }
+          case "OVERLAY_VISIBILITY_SET": {
+            setOverlayVisibility(!!message.visible, { notify: message.notify !== false });
+            sendResponse({ ok: true, visible: isOverlayVisible() });
+            return;
+          }
+          case "OVERLAY_VISIBILITY_GET": {
+            sendResponse({ ok: true, visible: isOverlayVisible() });
+            return;
+          }
+          case "EVALUATE_SELECTORS": {
+            const selectors = Array.isArray(message.selectors) ? message.selectors : [];
+            const results = selectors.map((entry) => {
+              const info = entry && typeof entry === "object" ? entry : { selector: entry };
+              const selector = typeof info.selector === "string" ? info.selector.trim() : "";
+              const type = typeof info.type === "string" ? info.type : void 0;
+              const matchMode = typeof info.matchMode === "string" ? info.matchMode : void 0;
+              if (!selector) {
+                return { selector: "", matchCount: 0, unique: false, error: "invalid_selector" };
+              }
+              try {
+                const parsed = parseSelectorForMatching(selector, type);
+                const count = countMatchesForSelector(parsed, document, { matchMode });
+                return {
+                  selector,
+                  type: parsed.type || type || null,
+                  matchCount: count,
+                  unique: count === 1
+                };
+              } catch (err) {
+                return {
+                  selector,
+                  type: type || null,
+                  matchCount: 0,
+                  unique: false,
+                  error: err && err.message ? err.message : "evaluation_failed"
+                };
+              }
+            });
+            sendResponse({ ok: true, results });
+            return;
+          }
           default: {
             sendResponse({ ok: false, reason: "unknown_message_type" });
           }
@@ -1690,7 +2043,7 @@
   function restoreRecordingState() {
     chrome.storage.local.get(["recording"], (result) => {
       if (result.recording) {
-        startRecording();
+        startRecording({ resetEvents: false });
       } else {
         ensureRecordingState(false);
         removeHighlight();

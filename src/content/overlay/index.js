@@ -1,5 +1,6 @@
 import { getSelectorCandidates, getIframeContext } from '../selectors/index.js';
 import { elementSelectionState, overlayControlsState, recorderState } from '../state.js';
+import { buildDomContextSnapshot } from '../utils/dom.js';
 
 function saveOverlayPosition(left, top) {
   chrome.storage.local.set({ overlayPosition: { left, top } });
@@ -133,7 +134,6 @@ export function createOverlayControls() {
   container.style.userSelect = 'none';
 
   const handle = document.createElement('div');
-  handle.textContent = 'Recorder Controls';
   handle.style.display = 'flex';
   handle.style.alignItems = 'center';
   handle.style.justifyContent = 'space-between';
@@ -143,6 +143,33 @@ export function createOverlayControls() {
   handle.style.letterSpacing = '0.08em';
   handle.style.marginBottom = '10px';
   handle.style.cursor = 'move';
+
+  const handleTitle = document.createElement('span');
+  handleTitle.textContent = 'Recorder Controls';
+  handleTitle.style.flex = '1 1 auto';
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.textContent = 'x';
+  closeBtn.setAttribute('aria-label', '오버레이 닫기');
+  closeBtn.style.cssText = 'margin-left:8px;flex:0 0 auto;width:20px;height:20px;border:none;border-radius:4px;background:transparent;color:rgba(255,255,255,0.7);font-size:12px;line-height:1;cursor:pointer;padding:0;';
+  closeBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    setOverlayVisibility(false);
+  });
+  closeBtn.addEventListener('mousedown', (event) => {
+    event.stopPropagation();
+  });
+  closeBtn.addEventListener('mouseenter', () => {
+    closeBtn.style.background = 'rgba(255,255,255,0.15)';
+  });
+  closeBtn.addEventListener('mouseleave', () => {
+    closeBtn.style.background = 'transparent';
+  });
+
+  handle.appendChild(handleTitle);
+  handle.appendChild(closeBtn);
 
   const buttonsRow = document.createElement('div');
   buttonsRow.style.display = 'flex';
@@ -202,11 +229,50 @@ export function createOverlayControls() {
   overlayControlsState.handle = handle;
   overlayControlsState.buttons = { start: startBtn, stop: stopBtn, select: selectBtn };
   overlayControlsState.status = status;
+  overlayControlsState.closeButton = closeBtn;
+  overlayControlsState.visible = false;
 
+  container.style.display = 'none';
   document.body.appendChild(container);
   restoreOverlayPosition(container);
   updateOverlayControlsState();
   setOverlayStatus('', 'info');
+}
+
+export function isOverlayVisible() {
+  return !!overlayControlsState.visible;
+}
+
+export function setOverlayVisibility(visible, options = {}) {
+  if (window !== window.top) return false;
+  if (!overlayControlsState.container) {
+    createOverlayControls();
+  }
+  const container = overlayControlsState.container;
+  if (!container) return false;
+
+  const target = !!visible;
+  const changed = overlayControlsState.visible !== target;
+  overlayControlsState.visible = target;
+
+  if (target) {
+    container.style.display = 'block';
+    updateOverlayControlsState();
+  } else {
+    stopOverlayDrag();
+    container.style.display = 'none';
+    setOverlayStatus('', 'info');
+  }
+
+  if (changed) {
+    chrome.storage.local.set({ overlayVisible: target });
+  }
+
+  if (changed && options.notify !== false) {
+    chrome.runtime.sendMessage({ type: 'OVERLAY_VISIBILITY_CHANGED', visible: target });
+  }
+
+  return changed;
 }
 
 function buildOverlayHtml(topSelector, selectors) {
@@ -365,7 +431,8 @@ export function highlightElement(element) {
       element: {
         tag: element.tagName,
         id: element.id || null,
-        classes: Array.from(element.classList || [])
+        classes: Array.from(element.classList || []),
+        domContext: buildDomContextSnapshot(element)
       }
     });
   }
@@ -432,6 +499,10 @@ function handleScroll() {
 
 export function initOverlaySystem() {
   createOverlayControls();
+  chrome.storage.local.get({ overlayVisible: false }, (data) => {
+    const storedVisible = !!data.overlayVisible;
+    setOverlayVisibility(storedVisible, { notify: false });
+  });
   document.addEventListener('mouseover', handleMouseOver, true);
   document.addEventListener('mouseout', handleMouseOut, true);
   window.addEventListener('scroll', handleScroll, true);
@@ -445,7 +516,8 @@ export function ensureRecordingState(isRecording) {
 export function getCurrentOverlayState() {
   return {
     overlayElement: recorderState.overlayElement,
-    currentHighlightedElement: recorderState.currentHighlightedElement
+    currentHighlightedElement: recorderState.currentHighlightedElement,
+    visible: overlayControlsState.visible
   };
 }
 

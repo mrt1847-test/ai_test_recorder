@@ -9,6 +9,7 @@ import {
   setOverlayStatus,
   updateOverlayControlsState
 } from '../overlay/index.js';
+import { buildDomContextSnapshot } from '../utils/dom.js';
 
 function resetSelectionHighlight() {
   clearSelectionParentHighlight();
@@ -55,7 +56,8 @@ function buildElementPayload(element) {
     text: (element.innerText || element.textContent || '').trim().slice(0, 80),
     id: element.id || null,
     classList: Array.from(element.classList || []),
-    iframeContext: getIframeContext(element)
+    iframeContext: getIframeContext(element),
+    domContext: buildDomContextSnapshot(element)
   };
 }
 

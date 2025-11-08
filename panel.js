@@ -19,6 +19,16 @@ const elementAttrApplyBtn = document.getElementById('element-attr-apply');
 const elementCodePreview = document.getElementById('element-code-preview');
 const elementCodeEl = document.getElementById('element-code');
 const elementCancelBtn = document.getElementById('element-cancel-btn');
+const overlayToggleBtn = document.getElementById('overlay-toggle-btn');
+const aiEndpointInput = document.getElementById('ai-endpoint');
+const aiApiKeyInput = document.getElementById('ai-api-key');
+const aiModelInput = document.getElementById('ai-model');
+const aiSettingsSaveBtn = document.getElementById('ai-settings-save');
+const aiSettingsStatusEl = document.getElementById('ai-settings-status');
+const aiReviewBtn = document.getElementById('ai-review-btn');
+const aiReviewStatusEl = document.getElementById('ai-review-status');
+const codeReviewSummaryEl = document.getElementById('code-review-summary');
+const codeReviewDiffEl = document.getElementById('code-review-diff');
 let recording = false;
 let selectedFramework = 'playwright';
 let selectedLanguage = 'python';
@@ -97,14 +107,492 @@ const selectionState = {
 };
 let manualActions = [];
 let manualActionSerial = 1;
+let overlayVisible = false;
+const aiSuggestionState = new Map();
+const aiSettingsDefaults = { endpoint: '', apiKey: '', model: '' };
+let aiSettings = { ...aiSettingsDefaults };
+let aiSettingsLoaded = false;
+let aiSettingsDirty = false;
+const aiCodeReviewState = {
+  status: 'idle',
+  updatedAt: null,
+  summary: '',
+  changes: []
+};
+let recordingStartUrl = '';
+chrome.storage.local.get({ recordingStartUrl: '' }, (data) => {
+  if (data && typeof data.recordingStartUrl === 'string') {
+    recordingStartUrl = data.recordingStartUrl;
+  }
+});
+const contentScriptReadyTabs = new Set();
+const inspectedTabId = (typeof chrome !== 'undefined' && chrome.devtools && chrome.devtools.inspectedWindow)
+  ? chrome.devtools.inspectedWindow.tabId
+  : null;
+
+function sanitizeAiSettingValue(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw.trim();
+}
+
+function setAiSettingsStatus(text, tone) {
+  if (!aiSettingsStatusEl) return;
+  aiSettingsStatusEl.className = 'ai-settings-status';
+  if (tone === 'error') {
+    aiSettingsStatusEl.classList.add('error');
+  } else if (tone === 'pending') {
+    aiSettingsStatusEl.classList.add('pending');
+  } else if (tone === 'success') {
+    aiSettingsStatusEl.classList.add('success');
+  }
+  aiSettingsStatusEl.textContent = text || '';
+}
+
+function applyAiSettingsToInputs(settings = {}) {
+  if (aiEndpointInput) {
+    aiEndpointInput.value = settings.endpoint || '';
+  }
+  if (aiApiKeyInput) {
+    aiApiKeyInput.value = settings.apiKey || '';
+  }
+  if (aiModelInput) {
+    aiModelInput.value = settings.model || '';
+  }
+}
+
+function isAiConfigured() {
+  return !!(aiSettings && typeof aiSettings === 'object' && aiSettings.endpoint && aiSettings.endpoint.trim());
+}
+
+function loadAiSettingsFromStorage() {
+  chrome.storage.local.get({ aiSettings: { ...aiSettingsDefaults } }, (data) => {
+    const stored = data && data.aiSettings ? data.aiSettings : {};
+    aiSettings = {
+      endpoint: sanitizeAiSettingValue(stored.endpoint),
+      apiKey: sanitizeAiSettingValue(stored.apiKey),
+      model: sanitizeAiSettingValue(stored.model)
+    };
+    aiSettingsLoaded = true;
+    const shouldSyncInputs = !aiSettingsDirty;
+    if (shouldSyncInputs) {
+      applyAiSettingsToInputs(aiSettings);
+      if (!isAiConfigured()) {
+        setAiSettingsStatus('AI API 엔드포인트를 설정하세요.', 'pending');
+      } else {
+        setAiSettingsStatus('AI 설정이 로드되었습니다.', 'success');
+      }
+    }
+    refreshSelectorListForCurrentEvent();
+  });
+}
+
+function markAiSettingsDirty() {
+  aiSettingsDirty = true;
+  setAiSettingsStatus('저장되지 않은 변경 사항이 있습니다.', 'pending');
+}
+
+function saveAiSettings() {
+  const nextSettings = {
+    endpoint: sanitizeAiSettingValue(aiEndpointInput ? aiEndpointInput.value : ''),
+    apiKey: sanitizeAiSettingValue(aiApiKeyInput ? aiApiKeyInput.value : ''),
+    model: sanitizeAiSettingValue(aiModelInput ? aiModelInput.value : '')
+  };
+  setAiSettingsStatus('저장 중...', 'pending');
+  chrome.storage.local.set({ aiSettings: nextSettings }, () => {
+    if (chrome.runtime.lastError) {
+      setAiSettingsStatus(`AI 설정 저장에 실패했습니다: ${chrome.runtime.lastError.message}`, 'error');
+      return;
+    }
+    aiSettings = nextSettings;
+    aiSettingsDirty = false;
+    setAiSettingsStatus('AI 설정이 저장되었습니다.', 'success');
+    refreshSelectorListForCurrentEvent();
+  });
+}
+
+if (aiSettingsSaveBtn) {
+  aiSettingsSaveBtn.addEventListener('click', () => {
+    if (!aiSettingsLoaded && !aiSettingsDirty) {
+      loadAiSettingsFromStorage();
+      return;
+    }
+    saveAiSettings();
+  });
+}
+
+[aiEndpointInput, aiApiKeyInput, aiModelInput].forEach((input) => {
+  if (!input) return;
+  input.addEventListener('input', markAiSettingsDirty);
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes.aiSettings) return;
+  const next = changes.aiSettings.newValue || aiSettingsDefaults;
+  aiSettings = {
+    endpoint: sanitizeAiSettingValue(next.endpoint),
+    apiKey: sanitizeAiSettingValue(next.apiKey),
+    model: sanitizeAiSettingValue(next.model)
+  };
+  if (!aiSettingsDirty) {
+    applyAiSettingsToInputs(aiSettings);
+    if (!isAiConfigured()) {
+      setAiSettingsStatus('AI API 엔드포인트를 설정하세요.', 'pending');
+    } else {
+      setAiSettingsStatus('AI 설정이 저장되었습니다.', 'success');
+    }
+  }
+  refreshSelectorListForCurrentEvent();
+});
+
+loadAiSettingsFromStorage();
+
+function setAiReviewStatus(status, message) {
+  if (!aiReviewStatusEl) return;
+  aiReviewStatusEl.className = 'code-review-status';
+  if (status === 'loading') {
+    aiReviewStatusEl.classList.add('info');
+    aiReviewStatusEl.textContent = message || 'AI가 코드 검토 중입니다...';
+  } else if (status === 'error') {
+    aiReviewStatusEl.classList.add('error');
+    aiReviewStatusEl.textContent = message || 'AI 코드 검토가 실패했습니다.';
+  } else if (status === 'success') {
+    aiReviewStatusEl.classList.add('success');
+    aiReviewStatusEl.textContent = message || 'AI 코드 검토가 완료되었습니다.';
+  } else if (status === 'info') {
+    aiReviewStatusEl.classList.add('info');
+    aiReviewStatusEl.textContent = message || '';
+  } else {
+    aiReviewStatusEl.textContent = message || '';
+  }
+  aiCodeReviewState.status = status;
+}
+
+function toggleAiReviewLoading(loading) {
+  if (!aiReviewBtn) return;
+  aiReviewBtn.disabled = !!loading;
+  aiReviewBtn.classList.toggle('loading', !!loading);
+}
+
+function clearCodeReviewArtifacts(options = {}) {
+  if (codeReviewSummaryEl) {
+    codeReviewSummaryEl.innerHTML = '';
+    if (!options.keepSummaryVisible) {
+      codeReviewSummaryEl.classList.add('hidden');
+    }
+  }
+  if (codeReviewDiffEl) {
+    codeReviewDiffEl.innerHTML = '';
+    if (!options.keepDiffVisible) {
+      codeReviewDiffEl.classList.add('hidden');
+    }
+  }
+}
+
+function escapeForDiff(text) {
+  if (text === null || text === undefined) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function computeLineDiff(oldText, newText) {
+  const oldLines = (oldText || '').split(/\r?\n/);
+  const newLines = (newText || '').split(/\r?\n/);
+  const m = oldLines.length;
+  const n = newLines.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i -= 1) {
+    for (let j = n - 1; j >= 0; j -= 1) {
+      if (oldLines[i] === newLines[j]) {
+        dp[i][j] = dp[i + 1][j + 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+  }
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (oldLines[i] === newLines[j]) {
+      ops.push({ type: 'equal', value: oldLines[i] });
+      i += 1;
+      j += 1;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ type: 'removed', value: oldLines[i] });
+      i += 1;
+    } else {
+      ops.push({ type: 'added', value: newLines[j] });
+      j += 1;
+    }
+  }
+  while (i < m) {
+    ops.push({ type: 'removed', value: oldLines[i] });
+    i += 1;
+  }
+  while (j < n) {
+    ops.push({ type: 'added', value: newLines[j] });
+    j += 1;
+  }
+  return ops;
+}
+
+function compressDiff(ops) {
+  const result = [];
+  let buffer = [];
+  const flushBuffer = () => {
+    if (buffer.length === 0) return;
+    if (buffer.length > 6) {
+      result.push(...buffer.slice(0, 3));
+      result.push({ type: 'context', value: '…' });
+      result.push(...buffer.slice(-3));
+    } else {
+      result.push(...buffer);
+    }
+    buffer = [];
+  };
+  ops.forEach((op) => {
+    if (op.type === 'equal') {
+      buffer.push(op);
+    } else {
+      flushBuffer();
+      result.push(op);
+    }
+  });
+  flushBuffer();
+  return result;
+}
+
+function renderCodeDiff(oldText, newText) {
+  if (!codeReviewDiffEl) return;
+  const ops = computeLineDiff(oldText, newText);
+  const includeOnlyChanges = ops.every((op) => op.type === 'equal');
+  const displayOps = includeOnlyChanges ? [] : compressDiff(ops);
+  codeReviewDiffEl.innerHTML = '';
+  if (displayOps.length === 0) {
+    codeReviewDiffEl.classList.add('hidden');
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  displayOps.forEach((op) => {
+    const line = document.createElement('div');
+    line.className = `code-diff-line ${op.type}`;
+    const marker = document.createElement('span');
+    marker.className = 'code-diff-marker';
+    if (op.type === 'added') {
+      marker.textContent = '+';
+    } else if (op.type === 'removed') {
+      marker.textContent = '−';
+    } else if (op.type === 'context') {
+      marker.textContent = '…';
+    } else {
+      marker.textContent = '';
+    }
+    const text = document.createElement('span');
+    text.innerHTML = escapeForDiff(op.value);
+    line.appendChild(marker);
+    line.appendChild(text);
+    fragment.appendChild(line);
+  });
+  codeReviewDiffEl.appendChild(fragment);
+  codeReviewDiffEl.classList.remove('hidden');
+}
+
+function renderCodeReviewSummary(summary, suggestions) {
+  if (!codeReviewSummaryEl) return;
+  codeReviewSummaryEl.innerHTML = '';
+  const fragment = document.createDocumentFragment();
+  if (summary) {
+    const summaryHeading = document.createElement('strong');
+    summaryHeading.textContent = '요약';
+    const summaryText = document.createElement('div');
+    summaryText.textContent = summary;
+    fragment.appendChild(summaryHeading);
+    fragment.appendChild(summaryText);
+  }
+  if (Array.isArray(suggestions) && suggestions.length > 0) {
+    const listTitle = document.createElement('strong');
+    listTitle.textContent = '개선 사항';
+    fragment.appendChild(listTitle);
+    const list = document.createElement('ul');
+    suggestions.forEach((item) => {
+      if (!item) return;
+      const text = typeof item === 'string' ? item : item.description || item.note || item.summary;
+      if (!text) return;
+      const li = document.createElement('li');
+      li.textContent = text;
+      list.appendChild(li);
+    });
+    if (list.children.length > 0) {
+      fragment.appendChild(list);
+    }
+  }
+  if (fragment.childNodes.length === 0) {
+    codeReviewSummaryEl.classList.add('hidden');
+    return;
+  }
+  codeReviewSummaryEl.appendChild(fragment);
+  codeReviewSummaryEl.classList.remove('hidden');
+}
+
+function normalizeCodeReviewResponse(response) {
+  if (!response || typeof response !== 'object') {
+    return { ok: false, reason: 'AI 응답 형식이 올바르지 않습니다.' };
+  }
+  if (response.ok === false) {
+    return { ok: false, reason: response.reason || response.error || 'AI 코드 검토 요청에 실패했습니다.' };
+  }
+  const data = response.result && typeof response.result === 'object' ? response.result : response;
+  let updatedCode = null;
+  if (typeof data.updatedCode === 'string') {
+    updatedCode = data.updatedCode;
+  } else if (typeof data.code === 'string') {
+    updatedCode = data.code;
+  } else if (data.result && typeof data.result.code === 'string') {
+    updatedCode = data.result.code;
+  }
+  const summary = typeof data.summary === 'string' ? data.summary : (typeof data.overview === 'string' ? data.overview : '');
+  const suggestions = Array.isArray(data.suggestions)
+    ? data.suggestions
+    : (Array.isArray(data.changes) ? data.changes : []);
+  return {
+    ok: true,
+    updatedCode,
+    summary,
+    suggestions
+  };
+}
+
+function requestAiCodeReview() {
+  if (!codeOutput) {
+    setAiReviewStatus('error', '코드 프리뷰 영역을 찾을 수 없습니다.');
+    return;
+  }
+  const originalCode = codeOutput.value || '';
+  if (!originalCode.trim()) {
+    setAiReviewStatus('info', '생성된 코드가 없습니다. 이벤트를 먼저 기록하세요.');
+    return;
+  }
+  toggleAiReviewLoading(true);
+  setAiReviewStatus('loading', 'AI가 코드 개선점을 분석 중입니다...');
+  clearCodeReviewArtifacts();
+
+  const testCaseInput = document.getElementById('test-purpose');
+  const testCaseDescription = testCaseInput ? (testCaseInput.value || '') : '';
+  const requestPayload = {
+    type: 'REQUEST_AI_CODE_REVIEW',
+    testCase: testCaseDescription,
+    code: originalCode,
+    framework: selectedFramework,
+    language: selectedLanguage,
+    events: allEvents,
+    manualActions,
+    aiModel: aiSettings.model || ''
+  };
+
+  chrome.runtime.sendMessage(requestPayload, (response) => {
+    toggleAiReviewLoading(false);
+    if (chrome.runtime.lastError) {
+      setAiReviewStatus('error', chrome.runtime.lastError.message || 'AI 코드 검토 요청 중 오류가 발생했습니다.');
+      return;
+    }
+    const normalized = normalizeCodeReviewResponse(response);
+    if (!normalized.ok) {
+      setAiReviewStatus('error', normalized.reason || 'AI 코드 검토를 불러오지 못했습니다.');
+      return;
+    }
+    const { updatedCode, summary, suggestions } = normalized;
+    if (typeof updatedCode === 'string' && updatedCode.trim() && updatedCode !== originalCode) {
+      codeOutput.value = updatedCode;
+      renderCodeDiff(originalCode, updatedCode);
+      renderCodeReviewSummary(summary, suggestions);
+      setAiReviewStatus('success', 'AI 검토 결과를 코드에 적용했습니다.');
+      aiCodeReviewState.updatedAt = Date.now();
+      aiCodeReviewState.summary = summary || '';
+      aiCodeReviewState.changes = suggestions || [];
+    } else {
+      renderCodeReviewSummary(summary, suggestions);
+      codeReviewDiffEl && codeReviewDiffEl.classList.add('hidden');
+      setAiReviewStatus('info', 'AI가 추가 수정 사항을 제안하지 않았습니다.');
+    }
+  });
+}
+
+if (aiReviewBtn) {
+  aiReviewBtn.addEventListener('click', () => {
+    if (aiCodeReviewState.status === 'loading') return;
+    requestAiCodeReview();
+  });
+}
+
+if (chrome.tabs && chrome.tabs.onRemoved) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    contentScriptReadyTabs.delete(tabId);
+  });
+}
+
+if (chrome.tabs && chrome.tabs.onReplaced) {
+  chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+    contentScriptReadyTabs.delete(removedTabId);
+  });
+}
+
+function ensureContentScriptInjected(tabId) {
+  if (tabId === undefined || tabId === null) {
+    return Promise.reject(new Error('invalid_tab'));
+  }
+  if (contentScriptReadyTabs.has(tabId)) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: 'ENSURE_CONTENT_SCRIPT', tabId }, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      if (!response || response.ok === false) {
+        reject(new Error(response && response.reason ? response.reason : 'failed_to_inject'));
+        return;
+      }
+      contentScriptReadyTabs.add(tabId);
+      resolve();
+    });
+  });
+}
 
 function withActiveTab(callback) {
-  chrome.tabs.query({active:true, currentWindow:true}, (tabs) => {
-    if (tabs && tabs[0]) {
-      callback(tabs[0]);
-    } else {
+  const deliverTab = (tab) => {
+    if (!tab) {
       callback(null);
+      return;
     }
+    ensureContentScriptInjected(tab.id)
+      .then(() => callback(tab))
+      .catch((error) => {
+        console.error('[AI Test Recorder] Failed to inject content script:', error);
+        alert('콘텐츠 스크립트를 주입할 수 없습니다. 페이지를 새로고침한 후 다시 시도해주세요.');
+        callback(null);
+      });
+  };
+
+  if (typeof inspectedTabId === 'number' && chrome.tabs && typeof chrome.tabs.get === 'function') {
+    chrome.tabs.get(inspectedTabId, (tab) => {
+      if (chrome.runtime.lastError || !tab) {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          const fallbackTab = tabs && tabs[0] ? tabs[0] : null;
+          deliverTab(fallbackTab);
+        });
+        return;
+      }
+      deliverTab(tab);
+    });
+    return;
+  }
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs && tabs[0] ? tabs[0] : null;
+    deliverTab(tab);
   });
 }
 
@@ -112,8 +600,8 @@ function triggerStartRecording(options = {}, callback) {
   const source = options.source || 'panel';
   if (recording) {
     if (typeof callback === 'function') callback({ok: false, reason: 'already_recording'});
-    return;
-  }
+      return;
+    }
   const urlInput = document.getElementById('test-url');
   const rawUrl = options.url !== undefined ? options.url : (urlInput ? urlInput.value : '');
   const requestedUrl = normalizeRequestedUrl(rawUrl);
@@ -121,41 +609,44 @@ function triggerStartRecording(options = {}, callback) {
     urlInput.value = requestedUrl;
   }
 
-  chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-    if (!tabs || !tabs[0]) {
+  withActiveTab((currentTab) => {
+    if (!currentTab) {
       if (typeof callback === 'function') callback({ok: false, reason: 'no_active_tab'});
       if (source === 'panel') {
-      alert('활성 탭을 찾을 수 없습니다.');
+        alert('활성 탭을 찾을 수 없습니다.');
       }
       return;
     }
-    const currentTab = tabs[0];
-    
+
+    const startUrl = requestedUrl || currentTab.url || '';
+    recordingStartUrl = startUrl;
+    chrome.storage.local.set({ recordingStartUrl: startUrl });
+
     const beginRecording = () => {
-    recording = true;
+      recording = true;
       if (startBtn) startBtn.disabled = true;
       if (stopBtn) stopBtn.disabled = false;
       chrome.storage.local.set({events: [], recording: true});
-    allEvents = [];
-    timeline.innerHTML = '';
-    selectorList.innerHTML = '';
-    if (codeOutput) codeOutput.value = '';
+      allEvents = [];
+      timeline.innerHTML = '';
+      selectorList.innerHTML = '';
+      if (codeOutput) codeOutput.value = '';
       logEntries.innerHTML = '';
-    currentEventIndex = -1;
-    listenEvents();
-    
+      currentEventIndex = -1;
+      listenEvents();
+
       chrome.tabs.sendMessage(currentTab.id, {type: 'RECORDING_START'}, () => {
-          if (chrome.runtime.lastError) {
+        if (chrome.runtime.lastError) {
           const tabId = currentTab.id;
           const onUpdated = (updatedTabId, changeInfo) => {
-              if (updatedTabId === tabId && changeInfo.status === 'complete') {
-                chrome.tabs.onUpdated.removeListener(onUpdated);
-                chrome.tabs.sendMessage(tabId, {type: 'RECORDING_START'});
-              }
-            };
-            chrome.tabs.onUpdated.addListener(onUpdated);
-          }
-        });
+            if (updatedTabId === tabId && changeInfo.status === 'complete') {
+              chrome.tabs.onUpdated.removeListener(onUpdated);
+              chrome.tabs.sendMessage(tabId, {type: 'RECORDING_START'});
+            }
+          };
+          chrome.tabs.onUpdated.addListener(onUpdated);
+        }
+      });
 
       if (typeof callback === 'function') callback({ok: true});
     };
@@ -180,13 +671,13 @@ function triggerStopRecording(options = {}, callback) {
   if (stopBtn) stopBtn.disabled = true;
   chrome.storage.local.remove(['recording']);
   
-  chrome.tabs.query({}, (tabs) => {
-    tabs.forEach(tab => {
+  withActiveTab((tab) => {
+    if (tab) {
       chrome.tabs.sendMessage(tab.id, {type: 'RECORDING_STOP'}, () => {});
-    });
+    }
   });
 
-  loadTimeline();
+  updateCode({ refreshTimeline: true, preserveSelection: true });
   if (typeof callback === 'function') callback({ok: true});
 }
 
@@ -224,14 +715,14 @@ const languageSelect = document.getElementById('language-select');
 // 프레임워크 변경 이벤트
 frameworkSelect.addEventListener('change', (e) => {
   selectedFramework = e.target.value;
-  updateCode(); // 실시간 코드 업데이트
+  updateCode({ preloadedEvents: allEvents }); // 실시간 코드 업데이트
   updateSelectionCodePreview();
 });
 
 // 언어 변경 이벤트
 languageSelect.addEventListener('change', (e) => {
   selectedLanguage = e.target.value;
-  updateCode(); // 실시간 코드 업데이트
+  updateCode({ preloadedEvents: allEvents }); // 실시간 코드 업데이트
   updateSelectionCodePreview();
 });
 
@@ -252,6 +743,7 @@ resetBtn.addEventListener('click', () => {
   // 전체 삭제
   chrome.storage.local.clear(() => {
     recording = false;
+    recordingStartUrl = '';
     allEvents = [];
     timeline.innerHTML = '';
     selectorList.innerHTML = '';
@@ -259,15 +751,15 @@ resetBtn.addEventListener('click', () => {
     logEntries.innerHTML = '';
     currentEventIndex = -1;
     // 모든 탭에 녹화 중지 메시지 전송
-    chrome.tabs.query({}, (tabs) => {
-      tabs.forEach(tab => {
+    withActiveTab((tab) => {
+      if (tab) {
         chrome.tabs.sendMessage(tab.id, {type: 'RECORDING_STOP'}, () => {});
-      });
+      }
     });
     manualActions = [];
     manualActionSerial = 1;
     persistManualActions(manualActions, () => {
-      updateCode();
+  updateCode({ refreshTimeline: true, preserveSelection: false });
     });
     cancelSelectionWorkflow('요소 선택 흐름이 초기화되었습니다.', 'info');
   });
@@ -284,6 +776,12 @@ if (elementSelectBtn) {
     } else {
       startSelectionWorkflow();
     }
+  });
+}
+
+if (overlayToggleBtn) {
+  overlayToggleBtn.addEventListener('click', () => {
+    requestOverlayVisibility(!overlayVisible, { revert: true });
   });
 }
 
@@ -321,24 +819,411 @@ if (elementAttrNameInput) {
   });
 }
 
+chrome.storage.local.get({ overlayVisible: false }, (data) => {
+  const storedOverlayVisible = !!data.overlayVisible;
+  applyOverlayVisibility(storedOverlayVisible, { persist: false });
+  if (storedOverlayVisible) {
+    requestOverlayVisibility(true, { revert: false });
+  } else {
+    syncOverlayVisibility();
+  }
+});
+
+function getAiStateKey(event) {
+  if (!event || typeof event !== 'object') return null;
+  if (event.id) return `id:${event.id}`;
+  if (event.manual && event.manual.id) return `manual:${event.manual.id}`;
+  if (event.timestamp) return `ts:${event.timestamp}`;
+  if (event.createdAt) return `created:${event.createdAt}`;
+  return null;
+}
+
+function getAiState(event) {
+  const key = getAiStateKey(event);
+  if (!key) return { status: 'idle', error: null };
+  let state = aiSuggestionState.get(key);
+  if (!state) {
+    if (event && Array.isArray(event.aiSelectorCandidates) && event.aiSelectorCandidates.length > 0) {
+      state = { status: 'loaded', error: null, updatedAt: event.aiSelectorsUpdatedAt || null };
+    } else {
+      state = { status: 'idle', error: null };
+    }
+    aiSuggestionState.set(key, state);
+  }
+  return state;
+}
+
+function setAiState(event, patch) {
+  const key = getAiStateKey(event);
+  if (!key) return null;
+  const prev = aiSuggestionState.get(key) || { status: 'idle', error: null };
+  const next = { ...prev, ...patch };
+  aiSuggestionState.set(key, next);
+  return next;
+}
+
+function formatAiStatusTime(timestamp) {
+  if (!timestamp) return '';
+  try {
+    const date = new Date(timestamp);
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${hours}:${minutes}`;
+  } catch (err) {
+    return '';
+  }
+}
+
+function appendAiMessage(text, tone = 'info') {
+  if (!selectorList) return false;
+  const box = document.createElement('div');
+  box.className = `selector-ai-message ${tone}`;
+  box.textContent = text;
+  selectorList.appendChild(box);
+  return true;
+}
+
+function buildAiRequestPayload(event) {
+  if (!event || typeof event !== 'object') return null;
+  return {
+    action: event.action || null,
+    value: event.value !== undefined ? event.value : null,
+    timestamp: event.timestamp || null,
+    selectorCandidates: Array.isArray(event.selectorCandidates) ? event.selectorCandidates : [],
+    primarySelector: event.primarySelector || null,
+    primarySelectorType: event.primarySelectorType || null,
+    primarySelectorMatchMode: event.primarySelectorMatchMode || null,
+    iframeContext: event.iframeContext || (event.frame && event.frame.iframeContext) || null,
+    domContext: event.domContext || (event.target && event.target.domContext) || null,
+    page: event.page || null,
+    metadata: event.metadata || {},
+    target: event.target || null,
+    clientRect: event.clientRect || null,
+    manual: event.manual || null
+  };
+}
+
+function normalizeAiCandidates(candidates) {
+  if (!Array.isArray(candidates)) return [];
+  return candidates
+    .map((candidate) => {
+      if (!candidate || typeof candidate !== 'object') return null;
+      const selector = typeof candidate.selector === 'string' ? candidate.selector.trim() : '';
+      if (!selector) return null;
+      const normalized = { ...candidate, selector };
+      normalized.type = normalized.type || inferSelectorType(selector);
+      normalized.reason = normalized.reason || 'AI 추천';
+      if (normalized.type !== 'text') {
+        delete normalized.matchMode;
+        delete normalized.textValue;
+      } else {
+        normalized.matchMode = normalized.matchMode || 'exact';
+      }
+      normalized.source = 'ai';
+      return normalized;
+    })
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function persistAiCandidates(eventIndex, candidates, updatedAt, callback) {
+  if (eventIndex === undefined || eventIndex === null || eventIndex < 0) {
+    if (typeof callback === 'function') callback();
+    return;
+  }
+  chrome.storage.local.get({ events: [] }, (res) => {
+    const events = Array.isArray(res.events) ? res.events : [];
+    if (eventIndex >= 0 && eventIndex < events.length && events[eventIndex] && typeof events[eventIndex] === 'object') {
+      events[eventIndex].aiSelectorCandidates = candidates;
+      events[eventIndex].aiSelectorsUpdatedAt = updatedAt;
+      chrome.storage.local.set({ events }, () => {
+        if (typeof callback === 'function') callback();
+      });
+    } else if (typeof callback === 'function') {
+      callback();
+    }
+  });
+}
+
+function requestAiSelectorsForEvent(event, eventIndex) {
+  const targetEvent = eventIndex >= 0 && allEvents[eventIndex] ? allEvents[eventIndex] : event;
+  if (!targetEvent) return;
+  if (!isAiConfigured()) {
+    setAiState(targetEvent, {
+      status: 'error',
+      error: 'AI API 설정이 필요합니다. 상단에서 엔드포인트와 (필요 시) API 키를 저장하세요.'
+    });
+    showSelectors(null, targetEvent, eventIndex);
+    return;
+  }
+  setAiState(targetEvent, { status: 'loading', error: null });
+  showSelectors(null, targetEvent, eventIndex);
+  const payload = buildAiRequestPayload(targetEvent);
+  if (!payload) {
+    setAiState(targetEvent, { status: 'error', error: '요청에 필요한 정보가 부족합니다.' });
+    showSelectors(null, targetEvent, eventIndex);
+    return;
+  }
+  const requestContext = {
+    testCase: document.getElementById('test-purpose') ? (document.getElementById('test-purpose').value || '') : '',
+    testUrl: document.getElementById('test-url') ? (document.getElementById('test-url').value || '') : '',
+    framework: selectedFramework,
+    language: selectedLanguage,
+    aiModel: aiSettings.model || '',
+    tabId: inspectedTabId
+  };
+  chrome.runtime.sendMessage(
+    {
+      type: 'REQUEST_AI_SELECTORS',
+      event: payload,
+      context: requestContext
+    },
+    (response) => {
+      if (chrome.runtime.lastError) {
+        setAiState(targetEvent, {
+          status: 'error',
+          error: chrome.runtime.lastError.message || 'AI 추천 요청 중 오류가 발생했습니다.'
+        });
+        showSelectors(null, targetEvent, eventIndex);
+        return;
+      }
+      if (!response || response.ok === false) {
+        const message = response && (response.reason || response.error || response.message)
+          ? response.reason || response.error || response.message
+          : 'AI 추천을 불러오지 못했습니다.';
+        setAiState(targetEvent, { status: 'error', error: message });
+        showSelectors(null, targetEvent, eventIndex);
+        return;
+      }
+      const normalizedCandidates = normalizeAiCandidates(response.candidates);
+      const updatedAt = Date.now();
+      targetEvent.aiSelectorCandidates = normalizedCandidates;
+      targetEvent.aiSelectorsUpdatedAt = updatedAt;
+      if (eventIndex >= 0 && allEvents[eventIndex]) {
+        allEvents[eventIndex] = targetEvent;
+      }
+      persistAiCandidates(eventIndex, normalizedCandidates, updatedAt, () => {
+        setAiState(targetEvent, { status: 'loaded', error: null, updatedAt });
+        showSelectors(null, targetEvent, eventIndex);
+      });
+    }
+  );
+}
+
+function renderAiRequestControls(event, resolvedIndex) {
+  if (!selectorList) return;
+  const header = document.createElement('div');
+  header.className = 'selector-ai-control';
+
+  const title = document.createElement('span');
+  title.className = 'selector-ai-title';
+  title.textContent = 'AI 추천 셀렉터';
+  header.appendChild(title);
+
+  const actions = document.createElement('div');
+  actions.className = 'selector-ai-actions';
+
+  const hasEvent = !!event && resolvedIndex !== undefined && resolvedIndex !== null && resolvedIndex >= 0;
+  const aiConfigured = isAiConfigured();
+  const state = hasEvent ? getAiState(event) : { status: 'idle', error: null };
+  const canRequest = hasEvent && aiConfigured;
+
+  const button = document.createElement('button');
+  button.className = 'selector-ai-button';
+  if (!aiConfigured) {
+    button.textContent = 'AI 설정 필요';
+    button.disabled = true;
+  } else if (!hasEvent) {
+    button.textContent = 'AI 추천 요청';
+    button.disabled = true;
+  } else if (state.status === 'loading') {
+    button.textContent = '요청 중...';
+    button.disabled = true;
+  } else if (state.status === 'error') {
+    button.textContent = '다시 시도';
+  } else if (state.status === 'loaded') {
+    button.textContent = 'AI 다시 요청';
+  } else {
+    button.textContent = 'AI 추천 요청';
+  }
+  if (!canRequest) {
+    button.disabled = true;
+  }
+  button.addEventListener('click', () => {
+    if (!canRequest || getAiState(event).status === 'loading') {
+      return;
+    }
+    requestAiSelectorsForEvent(event, resolvedIndex);
+  });
+
+  const statusEl = document.createElement('span');
+  statusEl.className = 'selector-ai-status';
+  if (!aiConfigured) {
+    statusEl.textContent = '상단 AI 설정을 저장하면 추천을 요청할 수 있습니다.';
+    statusEl.classList.add('error');
+  } else if (!canRequest) {
+    statusEl.textContent = '타임라인에서 이벤트를 선택하면 AI 추천을 요청할 수 있습니다.';
+    statusEl.classList.add('muted');
+  } else if (state.status === 'loading') {
+    statusEl.textContent = 'AI가 분석 중입니다...';
+    statusEl.classList.add('info');
+  } else if (state.status === 'error') {
+    statusEl.textContent = state.error || 'AI 추천을 불러오지 못했습니다.';
+    statusEl.classList.add('error');
+  } else if (state.status === 'loaded') {
+    const timeText = state.updatedAt ? ` (업데이트 ${formatAiStatusTime(state.updatedAt)})` : '';
+    statusEl.textContent = `AI 추천 결과가 준비되었습니다${timeText}`;
+    statusEl.classList.add('success');
+  } else {
+    statusEl.textContent = '필요할 때 AI 추천을 받아보세요.';
+    statusEl.classList.add('muted');
+  }
+
+  actions.appendChild(button);
+  actions.appendChild(statusEl);
+  header.appendChild(actions);
+  selectorList.appendChild(header);
+}
+
+function applyOverlayVisibility(visible, options = {}) {
+  overlayVisible = !!visible;
+  if (overlayToggleBtn) {
+    overlayToggleBtn.setAttribute('aria-pressed', overlayVisible ? 'true' : 'false');
+    overlayToggleBtn.classList.toggle('active', overlayVisible);
+    overlayToggleBtn.textContent = overlayVisible ? '오버레이 숨기기' : '오버레이 표시';
+  }
+  if (options.persist) {
+    chrome.storage.local.set({ overlayVisible });
+  }
+}
+
+function requestOverlayVisibility(targetVisible, options = {}) {
+  const desired = !!targetVisible;
+  withActiveTab((tab) => {
+    if (!tab) {
+      applyOverlayVisibility(false, { persist: true });
+      return;
+    }
+    chrome.tabs.sendMessage(tab.id, { type: 'OVERLAY_VISIBILITY_SET', visible: desired }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('오버레이 표시 상태를 변경할 수 없습니다:', chrome.runtime.lastError.message);
+        if (options.revert !== false) {
+          applyOverlayVisibility(false, { persist: false });
+        }
+        return;
+      }
+      if (response && response.ok === false) {
+        console.warn('오버레이 표시 요청이 실패했습니다:', response.reason);
+        if (options.revert !== false) {
+          applyOverlayVisibility(false, { persist: false });
+        }
+        return;
+      }
+      const actual = response && Object.prototype.hasOwnProperty.call(response, 'visible') ? !!response.visible : desired;
+      applyOverlayVisibility(actual, { persist: true });
+    });
+  });
+}
+
+function syncOverlayVisibility() {
+  withActiveTab((tab) => {
+    if (!tab) return;
+    chrome.tabs.sendMessage(tab.id, { type: 'OVERLAY_VISIBILITY_GET' }, (response) => {
+      if (chrome.runtime.lastError) {
+        return;
+      }
+      if (response && response.ok) {
+        applyOverlayVisibility(!!response.visible, { persist: false });
+      }
+    });
+  });
+}
+
+function refreshSelectorListForCurrentEvent() {
+  if (currentEventIndex >= 0 && allEvents[currentEventIndex]) {
+    const currentEvent = allEvents[currentEventIndex];
+    showSelectors(currentEvent.selectorCandidates || [], currentEvent, currentEventIndex);
+  }
+}
+
+function syncTimelineFromEvents(events, options = {}) {
+  const {
+    preserveSelection = false,
+    selectLast = false,
+    resetAiState = false
+  } = options;
+  const previousIndex = preserveSelection ? currentEventIndex : -1;
+  const normalizedEvents = Array.isArray(events)
+    ? events.map((ev) => normalizeEventRecord(ev))
+    : [];
+
+  const nextAiState = new Map();
+  normalizedEvents.forEach((event) => {
+    const key = getAiStateKey(event);
+    if (!key) return;
+    const existing = resetAiState ? null : aiSuggestionState.get(key);
+    const hasCandidates = Array.isArray(event.aiSelectorCandidates) && event.aiSelectorCandidates.length > 0;
+    if (existing && existing.status === 'loading') {
+      nextAiState.set(key, existing);
+    } else if (hasCandidates) {
+      nextAiState.set(key, {
+        status: 'loaded',
+        error: null,
+        updatedAt: event.aiSelectorsUpdatedAt || (existing && existing.updatedAt) || null
+      });
+    } else if (existing) {
+      nextAiState.set(key, existing);
+    } else {
+      nextAiState.set(key, { status: 'idle', error: null });
+    }
+  });
+  aiSuggestionState.clear();
+  nextAiState.forEach((state, key) => aiSuggestionState.set(key, state));
+
+  allEvents = normalizedEvents;
+  if (timeline) {
+    timeline.innerHTML = '';
+    normalizedEvents.forEach((event, index) => {
+      appendTimelineItem(event, index);
+    });
+    const items = timeline.querySelectorAll('.timeline-item');
+    items.forEach((item) => item.classList.remove('selected'));
+  }
+
+  let indexToSelect = -1;
+  if (preserveSelection && previousIndex >= 0 && previousIndex < normalizedEvents.length) {
+    indexToSelect = previousIndex;
+  } else if (selectLast && normalizedEvents.length > 0) {
+    indexToSelect = normalizedEvents.length - 1;
+  }
+
+  if (indexToSelect >= 0) {
+    currentEventIndex = indexToSelect;
+    const selectedItem = timeline
+      ? timeline.querySelector(`[data-event-index="${indexToSelect}"]`)
+      : null;
+    if (selectedItem) {
+      selectedItem.classList.add('selected');
+    }
+    const selectedEvent = normalizedEvents[indexToSelect];
+    showSelectors(selectedEvent.selectorCandidates || [], selectedEvent, indexToSelect);
+    showIframe(selectedEvent.iframeContext);
+  } else {
+    currentEventIndex = -1;
+    if (selectorList) {
+      selectorList.innerHTML = '';
+    }
+    showIframe(null);
+  }
+
+  return normalizedEvents;
+}
+
 function loadTimeline() {
   chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
-    allEvents = (res && res.events || []).map((ev) => normalizeEventRecord(ev));
-    timeline.innerHTML = '';
-    allEvents.forEach((ev, index) => {
-      appendTimelineItem(ev, index);
-    });
-    // 마지막 이벤트 자동 선택
-    if (allEvents.length > 0) {
-      currentEventIndex = allEvents.length - 1;
-      const lastItem = document.querySelector(`[data-event-index="${currentEventIndex}"]`);
-      if (lastItem) {
-        lastItem.classList.add('selected');
-        showSelectors(allEvents[currentEventIndex].selectorCandidates || [], allEvents[currentEventIndex], currentEventIndex);
-        showIframe(allEvents[currentEventIndex].iframeContext);
-      }
-    }
-    updateCode();
+    const events = (res && res.events) || [];
+    const normalized = syncTimelineFromEvents(events, { selectLast: true, resetAiState: true });
+    updateCode({ preloadedEvents: normalized });
   });
 }
 
@@ -349,8 +1234,16 @@ function listenEvents() {
       const handledAsync = handleOverlayCommand(msg, sendResponse);
       return handledAsync;
     }
+    if (msg.type === 'OVERLAY_VISIBILITY_CHANGED') {
+      applyOverlayVisibility(!!msg.visible, { persist: true });
+      return;
+    }
     if (msg.type === 'EVENT_RECORDED') {
       const normalizedEvent = normalizeEventRecord(msg.event);
+      const stateKey = getAiStateKey(normalizedEvent);
+      if (stateKey) {
+        aiSuggestionState.delete(stateKey);
+      }
       allEvents.push(normalizedEvent);
       const index = allEvents.length - 1;
       appendTimelineItem(normalizedEvent, index);
@@ -364,7 +1257,7 @@ function listenEvents() {
       showSelectors(normalizedEvent.selectorCandidates || [], normalizedEvent, index);
       showIframe(normalizedEvent.iframeContext);
       // 실시간 코드 업데이트
-      updateCode();
+      updateCode({ preloadedEvents: allEvents });
     }
     if (msg.type === 'ELEMENT_HOVERED') {
       // 마우스 오버 시 DevTools에 셀렉터 정보 표시
@@ -461,39 +1354,139 @@ function appendTimelineItem(ev, index) {
 }
 
 function showSelectors(list, event, eventIndex) {
+  if (!selectorList) return;
   selectorList.innerHTML = '';
-  if (!list || list.length === 0) {
-    selectorList.innerHTML = '<div style="padding: 10px; color: #666;">셀렉터 후보가 없습니다.</div>';
+
+  const hasEventContext = !!event;
+  const resolvedIndex = hasEventContext
+    ? (eventIndex !== undefined && eventIndex !== null ? eventIndex : allEvents.indexOf(event))
+    : -1;
+  let hasAiContent = false;
+
+  renderAiRequestControls(event, resolvedIndex);
+
+  if (hasEventContext) {
+    const state = getAiState(event);
+    const aiCandidates = Array.isArray(event.aiSelectorCandidates) ? event.aiSelectorCandidates : [];
+    if (state.status === 'loading') {
+      hasAiContent = appendAiMessage('AI가 추천 셀렉터를 분석하는 중입니다...', 'loading') || hasAiContent;
+    } else if (state.status === 'error') {
+      hasAiContent = appendAiMessage(state.error || 'AI 추천을 불러오지 못했습니다.', 'error') || hasAiContent;
+    } else if (aiCandidates.length === 0) {
+      hasAiContent = appendAiMessage('AI 추천 후보가 아직 없습니다.', 'empty') || hasAiContent;
+    }
+    if (aiCandidates.length > 0) {
+      const aiHeader = document.createElement('div');
+      aiHeader.className = 'selector-section-title';
+      aiHeader.textContent = 'AI 추천';
+      selectorList.appendChild(aiHeader);
+      renderSelectorGroup(aiCandidates, {
+        source: 'ai',
+        event,
+        resolvedIndex,
+        listRef: aiCandidates
+      });
+      hasAiContent = true;
+    }
+  } else {
+    appendAiMessage('AI 추천 후보가 아직 없습니다.', 'empty');
+  }
+
+  const baseCandidates = hasEventContext
+    ? (event && Array.isArray(event.selectorCandidates) ? event.selectorCandidates : [])
+    : (list || []);
+
+  if (!hasEventContext) {
+    if (!Array.isArray(baseCandidates) || baseCandidates.length === 0) {
+      const emptyMessage = document.createElement('div');
+      emptyMessage.style.padding = '10px';
+      emptyMessage.style.color = '#666';
+      emptyMessage.textContent = '셀렉터 후보가 없습니다.';
+      selectorList.appendChild(emptyMessage);
+      return;
+    }
+    renderSelectorGroup(baseCandidates, {
+      source: 'base',
+      event: null,
+      resolvedIndex,
+      listRef: baseCandidates
+    });
     return;
   }
-  const idx = eventIndex !== undefined ? eventIndex : (event ? allEvents.indexOf(event) : currentEventIndex);
-  list.forEach((s, listIndex) => {
+
+  if (Array.isArray(baseCandidates) && baseCandidates.length > 0) {
+    const header = document.createElement('div');
+    header.className = 'selector-section-title';
+    header.textContent = '기본 추천';
+    selectorList.appendChild(header);
+    renderSelectorGroup(baseCandidates, {
+      source: 'base',
+      event,
+      resolvedIndex,
+      listRef: baseCandidates
+    });
+  } else if (!hasAiContent) {
+    const emptyMessage = document.createElement('div');
+    emptyMessage.style.padding = '10px';
+    emptyMessage.style.color = '#666';
+    emptyMessage.textContent = '셀렉터 후보가 없습니다.';
+    selectorList.appendChild(emptyMessage);
+  }
+}
+
+function renderSelectorGroup(candidates, options = {}) {
+  const {
+    source = 'base',
+    event = null,
+    resolvedIndex = -1,
+    listRef = candidates
+  } = options;
+
+  if (!Array.isArray(candidates) || candidates.length === 0) return;
+
+  candidates.forEach((candidate, listIndex) => {
+    const candidateRef = listRef && listRef[listIndex] ? listRef[listIndex] : candidate;
+    if (!candidateRef || !candidateRef.selector) return;
     const item = document.createElement('div');
     item.className = 'selector-item';
-    const selectorType = s.type || inferSelectorType(s.selector);
-    const candidateMatchMode = s.matchMode || (selectorType === 'text' ? 'exact' : null);
-    const primaryMatchMode = event && event.primarySelectorMatchMode ? event.primarySelectorMatchMode : (selectorType === 'text' ? 'exact' : null);
-    const isApplied = event && event.primarySelector === s.selector && (event.primarySelectorType ? event.primarySelectorType === selectorType : true) && (selectorType !== 'text' || candidateMatchMode === primaryMatchMode);
-    const scoreLabel = typeof s.score === 'number' ? `${s.score}%` : '';
+    const selectorType = candidateRef.type || inferSelectorType(candidateRef.selector);
+    const candidateMatchMode = candidateRef.matchMode || (selectorType === 'text' ? 'exact' : null);
+    const primaryMatchMode = event && event.primarySelectorMatchMode
+      ? event.primarySelectorMatchMode
+      : (selectorType === 'text' ? 'exact' : null);
+    const isApplied =
+      !!event &&
+      event.primarySelector === candidateRef.selector &&
+      (event.primarySelectorType ? event.primarySelectorType === selectorType : true) &&
+      (selectorType !== 'text' || candidateMatchMode === primaryMatchMode);
+    const scoreLabel = typeof candidateRef.score === 'number' ? `${candidateRef.score}%` : '';
     const typeLabel = (selectorType || 'css').toUpperCase();
     item.innerHTML = `
       <div class="selector-main">
         <span class="type">${typeLabel}</span>
-        <span class="sel">${s.selector}</span>
+        <span class="sel">${candidateRef.selector}</span>
         <span class="score">${scoreLabel}</span>
       </div>
       <div class="selector-actions">
         <button class="apply-btn" ${isApplied ? 'style="background: #4CAF50; color: white;"' : ''}>${isApplied ? '✓ 적용됨' : 'Apply'}</button>
         <button class="highlight-btn">Highlight</button>
       </div>
-      <div class="reason">${s.reason}</div>`;
+      <div class="reason">${candidateRef.reason || ''}</div>`;
+
     const applyBtn = item.querySelector('.apply-btn');
     const highlightBtn = item.querySelector('.highlight-btn');
-    applyBtn.addEventListener('click', ()=> { applySelector(s, idx); });
-    highlightBtn.addEventListener('click', ()=> { highlightSelector(s); });
+    if (applyBtn) {
+      applyBtn.addEventListener('click', () => {
+        applySelector({ ...candidateRef }, resolvedIndex, source, listIndex);
+      });
+    }
+    if (highlightBtn) {
+      highlightBtn.addEventListener('click', () => {
+        highlightSelector(candidateRef);
+      });
+    }
 
     if (selectorType === 'text') {
-      const matchMode = s.matchMode || 'exact';
       const toggle = document.createElement('div');
       toggle.className = 'match-toggle';
       const exactBtn = document.createElement('button');
@@ -504,21 +1497,36 @@ function showSelectors(list, event, eventIndex) {
       containsBtn.textContent = '포함';
 
       const updateButtons = () => {
-        const currentMode = s.matchMode || 'exact';
+        const currentMode = candidateRef.matchMode || 'exact';
         exactBtn.classList.toggle('active', currentMode === 'exact');
         containsBtn.classList.toggle('active', currentMode === 'contains');
       };
 
       const setMode = (mode) => {
-        if (mode === (s.matchMode || 'exact')) return;
-        s.matchMode = mode;
-        list[listIndex].matchMode = mode;
-        if (event && event.selectorCandidates && event.selectorCandidates[listIndex]) {
-          event.selectorCandidates[listIndex].matchMode = mode;
+        if (mode === (candidateRef.matchMode || 'exact')) return;
+        candidateRef.matchMode = mode;
+        if (Array.isArray(listRef) && listRef[listIndex]) {
+          listRef[listIndex].matchMode = mode;
         }
-        if (event && event.primarySelector === s.selector && (event.primarySelectorType ? event.primarySelectorType === selectorType : true)) {
+        if (event) {
+          if (source === 'ai') {
+            if (!Array.isArray(event.aiSelectorCandidates)) {
+              event.aiSelectorCandidates = [];
+            }
+            if (event.aiSelectorCandidates[listIndex]) {
+              event.aiSelectorCandidates[listIndex].matchMode = mode;
+            }
+          } else if (Array.isArray(event.selectorCandidates) && event.selectorCandidates[listIndex]) {
+            event.selectorCandidates[listIndex].matchMode = mode;
+          }
+        }
+        if (
+          event &&
+          event.primarySelector === candidateRef.selector &&
+          (event.primarySelectorType ? event.primarySelectorType === selectorType : true)
+        ) {
           event.primarySelectorMatchMode = mode;
-          applySelector({...s, matchMode: mode}, idx);
+          applySelector({ ...candidateRef, matchMode: mode }, resolvedIndex, source, listIndex);
         }
         updateButtons();
       };
@@ -546,8 +1554,8 @@ function showIframe(ctx) {
   if (ctx) iframeBanner.classList.remove('hidden'); else iframeBanner.classList.add('hidden');
 }
 
-function applySelector(s, eventIndex) {
-  const targetIndex = eventIndex !== undefined ? eventIndex : currentEventIndex;
+function applySelector(s, eventIndex, source = 'base', listIndex = -1) {
+  const targetIndex = eventIndex !== undefined && eventIndex !== null ? eventIndex : currentEventIndex;
   if (targetIndex < 0) {
     alert('먼저 타임라인에서 이벤트를 선택하세요.');
     return;
@@ -555,66 +1563,85 @@ function applySelector(s, eventIndex) {
   chrome.storage.local.get({events:[]}, res => {
     const evs = res.events || [];
     if (targetIndex >= 0 && targetIndex < evs.length) {
-      evs[targetIndex].primarySelector = s.selector;
-      evs[targetIndex].primarySelectorType = s.type || inferSelectorType(s.selector);
-      if (evs[targetIndex].primarySelectorType === 'text') {
-        evs[targetIndex].primarySelectorMatchMode = s.matchMode || 'exact';
+      const targetEvent = evs[targetIndex];
+      const selectorType = s.type || inferSelectorType(s.selector);
+
+      if (source === 'ai') {
+        if (!Array.isArray(targetEvent.aiSelectorCandidates)) {
+          targetEvent.aiSelectorCandidates = [];
+        }
+        if (listIndex >= 0 && listIndex < targetEvent.aiSelectorCandidates.length) {
+          targetEvent.aiSelectorCandidates[listIndex] = { ...targetEvent.aiSelectorCandidates[listIndex], ...s };
+        } else if (listIndex === -1) {
+          targetEvent.aiSelectorCandidates.push({ ...s });
+        }
+      } else if (Array.isArray(targetEvent.selectorCandidates) && listIndex >= 0 && listIndex < targetEvent.selectorCandidates.length) {
+        targetEvent.selectorCandidates[listIndex] = { ...targetEvent.selectorCandidates[listIndex], ...s };
+      }
+
+      targetEvent.primarySelector = s.selector;
+      targetEvent.primarySelectorType = selectorType;
+      if (selectorType === 'text') {
+        targetEvent.primarySelectorMatchMode = s.matchMode || 'exact';
       } else {
-        delete evs[targetIndex].primarySelectorMatchMode;
+        delete targetEvent.primarySelectorMatchMode;
       }
-      if (s.type === 'text' && s.textValue) {
-        evs[targetIndex].primarySelectorText = s.textValue;
+      if (selectorType === 'text' && s.textValue) {
+        targetEvent.primarySelectorText = s.textValue;
       } else {
-        delete evs[targetIndex].primarySelectorText;
+        delete targetEvent.primarySelectorText;
       }
-      if (s.type === 'xpath' && s.xpathValue) {
-        evs[targetIndex].primarySelectorXPath = s.xpathValue;
-      } else if (evs[targetIndex].primarySelectorType !== 'xpath') {
-        delete evs[targetIndex].primarySelectorXPath;
+      if (selectorType === 'xpath' && s.xpathValue) {
+        targetEvent.primarySelectorXPath = s.xpathValue;
+      } else if (selectorType !== 'xpath') {
+        delete targetEvent.primarySelectorXPath;
       }
+
       chrome.storage.local.set({events: evs}, () => {
-        // UI 업데이트
         if (allEvents[targetIndex]) {
           allEvents[targetIndex].primarySelector = s.selector;
-          allEvents[targetIndex].primarySelectorType = evs[targetIndex].primarySelectorType;
-          if (evs[targetIndex].primarySelectorType === 'text') {
-            allEvents[targetIndex].primarySelectorMatchMode = evs[targetIndex].primarySelectorMatchMode;
+          allEvents[targetIndex].primarySelectorType = selectorType;
+          if (selectorType === 'text') {
+            allEvents[targetIndex].primarySelectorMatchMode = targetEvent.primarySelectorMatchMode;
+            if (s.textValue) {
+              allEvents[targetIndex].primarySelectorText = s.textValue;
+            } else {
+              delete allEvents[targetIndex].primarySelectorText;
+            }
           } else {
             delete allEvents[targetIndex].primarySelectorMatchMode;
-          }
-          if (s.type === 'text' && s.textValue) {
-            allEvents[targetIndex].primarySelectorText = s.textValue;
-          } else {
             delete allEvents[targetIndex].primarySelectorText;
           }
-          if (s.type === 'xpath' && s.xpathValue) {
+          if (selectorType === 'xpath' && s.xpathValue) {
             allEvents[targetIndex].primarySelectorXPath = s.xpathValue;
-          } else if (allEvents[targetIndex].primarySelectorType !== 'xpath') {
+          } else if (selectorType !== 'xpath') {
             delete allEvents[targetIndex].primarySelectorXPath;
           }
+          if (source === 'ai') {
+            allEvents[targetIndex].aiSelectorCandidates = targetEvent.aiSelectorCandidates;
+          } else if (Array.isArray(targetEvent.selectorCandidates)) {
+            allEvents[targetIndex].selectorCandidates = targetEvent.selectorCandidates;
+          }
         }
-        // 타임라인 아이템 업데이트
         const timelineItem = document.querySelector(`[data-event-index="${targetIndex}"]`);
         if (timelineItem) {
           const usedSelector = s.selector;
-          timelineItem.textContent = new Date(evs[targetIndex].timestamp).toLocaleTimeString() + ' - ' + evs[targetIndex].action + ' - ' + usedSelector;
+          timelineItem.textContent = new Date(targetEvent.timestamp).toLocaleTimeString() + ' - ' + targetEvent.action + ' - ' + usedSelector;
         }
-        // 셀렉터 목록 다시 표시
         if (currentEventIndex === targetIndex && allEvents[targetIndex]) {
-          showSelectors(evs[targetIndex].selectorCandidates || [], evs[targetIndex], targetIndex);
+          showSelectors(null, allEvents[targetIndex], targetIndex);
         }
-        // 코드 자동 업데이트
-        updateCode();
+        updateCode({ refreshTimeline: true, preserveSelection: true });
       });
     }
   });
 }
 
 function highlightSelector(candidate) {
-  chrome.tabs.query({active:true,currentWindow:true}, tabs => {
-    if (!tabs[0]) return;
+  withActiveTab((tab) => {
+    if (!tab) return;
     chrome.scripting.executeScript({
-      target:{tabId:tabs[0].id},
+      target:{tabId:tab.id},
       func: (selCandidate)=>{
         function findByCandidate(cand) {
           if (!cand) return null;
@@ -1105,9 +2132,9 @@ function loadManualActions(callback) {
   });
 }
 
-function emitManualActionLines(lines, action, frameworkLower, languageLower, indent) {
+function emitManualActionLines(lines, action, frameworkLower, languageLower, indent, options = {}) {
   if (!lines || !action) return;
-  const actionLines = buildManualActionCode(action, frameworkLower, languageLower, indent);
+  const actionLines = buildManualActionCode(action, frameworkLower, languageLower, indent, options);
   if (!Array.isArray(actionLines) || !actionLines.length) return;
   actionLines.forEach((line) => lines.push(line));
 }
@@ -1265,7 +2292,7 @@ function applySelectionAction(actionType, options = {}) {
     }
     addManualAction(entry, () => {
       cancelSelectionWorkflow('현재 선택을 코드에 반영했습니다.', 'success');
-      updateCode();
+      updateCode({ preloadedEvents: allEvents });
     });
     selectionState.pendingAction = null;
     selectionState.pendingAttribute = '';
@@ -1287,7 +2314,7 @@ function applySelectionAction(actionType, options = {}) {
   addManualAction(entry, () => {
     cancelSelectionWorkflow('', 'info');
     setElementStatus('코드에 동작을 추가했습니다.', 'success');
-    updateCode();
+    updateCode({ preloadedEvents: allEvents });
     if (actionType === 'click') {
       executeSelectionAction('click', path, {}, (result) => {
         if (!result || !result.ok) {
@@ -1339,16 +2366,18 @@ function buildPlaywrightLocatorChain(path, languageLower, indent, serial) {
   if (!Array.isArray(path) || path.length === 0) {
     return {lines, finalVar: null};
   }
-  let baseExpr = 'page';
+  const pythonClass = languageLower === 'python-class';
+  const pythonLike = languageLower === 'python' || pythonClass;
+  let baseExpr = pythonClass ? 'self.page' : 'page';
   let finalVar = null;
   const prefix = typeof serial !== 'undefined' ? serial : Date.now();
   path.forEach((entry, index) => {
     const isLast = index === path.length - 1;
-    const varName = languageLower === 'python'
+    const varName = pythonLike
       ? `${isLast ? 'target' : 'node'}_${prefix}_${index + 1}`
       : `${isLast ? 'target' : 'node'}_${prefix}_${index + 1}`;
     const locatorExpr = buildPlaywrightLocatorExpression(baseExpr, entry, languageLower);
-    if (languageLower === 'python') {
+    if (pythonLike) {
       lines.push(`${indent}${varName} = ${locatorExpr}`);
     } else {
       lines.push(`${indent}const ${varName} = ${locatorExpr};`);
@@ -1359,12 +2388,12 @@ function buildPlaywrightLocatorChain(path, languageLower, indent, serial) {
   return {lines, finalVar};
 }
 
-function buildSeleniumLocatorChainPython(path, indent, serial) {
+function buildSeleniumLocatorChainPython(path, indent, serial, driverVar = 'driver') {
   const lines = [];
   if (!Array.isArray(path) || path.length === 0) {
     return {lines, finalVar: null};
   }
-  let baseExpr = 'driver';
+  let baseExpr = driverVar;
   let finalVar = null;
   path.forEach((entry, index) => {
     const spec = buildSeleniumLocatorSpec(entry);
@@ -1396,14 +2425,14 @@ function buildSeleniumLocatorChainJS(path, indent, serial) {
   return {lines, finalVar};
 }
 
-function buildSeleniumLocatorChain(path, languageLower, indent, serial) {
-  if (languageLower === 'python') {
-    return buildSeleniumLocatorChainPython(path, indent, serial);
+function buildSeleniumLocatorChain(path, languageLower, indent, serial, driverVar = 'driver') {
+  if (languageLower === 'python' || languageLower === 'python-class') {
+    return buildSeleniumLocatorChainPython(path, indent, serial, driverVar);
   }
   return buildSeleniumLocatorChainJS(path, indent, serial);
 }
 
-function buildManualActionCode(action, frameworkLower, languageLower, indent) {
+function buildManualActionCode(action, frameworkLower, languageLower, indent, options = {}) {
   if (!action || !Array.isArray(action.path) || action.path.length === 0) {
     return [];
   }
@@ -1411,11 +2440,55 @@ function buildManualActionCode(action, frameworkLower, languageLower, indent) {
   const path = action.path;
   const lines = [];
   let chainResult = null;
+  const pythonLike = languageLower === 'python' || languageLower === 'python-class';
+  const usageTracker = options.usage || null;
 
   if (frameworkLower === 'playwright') {
     chainResult = buildPlaywrightLocatorChain(path, languageLower, indent, serial);
+  } else if (frameworkLower === 'cypress') {
+    const isTypeScript = languageLower === 'cypress-typescript';
+    const cypressUsage = { usesXPath: false };
+    lines.push("describe('AI Test Recorder', () => {");
+    lines.push("  it('should run recorded steps', () => {");
+    lines.push("    cy.visit('REPLACE_URL');");
+    lines.push("");
+    let currentFrameContext = null;
+    timeline.forEach((entry) => {
+      if (entry.kind === 'event') {
+        const { event, selectorInfo } = entry;
+        const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
+        if (!framesEqual(targetFrame, currentFrameContext)) {
+          if (targetFrame) {
+            lines.push("    // TODO: Handle iframe interaction for Cypress manually.");
+            currentFrameContext = targetFrame;
+          } else if (currentFrameContext) {
+            lines.push("    // Returned from iframe context.");
+            currentFrameContext = null;
+          }
+        }
+        const actionLine = buildCypressAction(event, selectorInfo, { usage: cypressUsage });
+        if (actionLine) {
+          lines.push(`    ${actionLine}`);
+        } else {
+          lines.push("    // Unsupported event action for Cypress.");
+        }
+      } else if (entry.kind === 'manual') {
+        const manualLines = buildManualActionCode(entry.action, frameworkLower, languageLower, '    ', { usage: cypressUsage });
+        if (manualLines && manualLines.length) {
+          manualLines.forEach((line) => lines.push(line));
+        }
+      }
+    });
+    lines.push("  });");
+    lines.push("});");
+    if (cypressUsage.usesXPath) {
+      const pluginImport = isTypeScript ? "import 'cypress-xpath';" : "require('cypress-xpath');";
+      lines.unshift(pluginImport);
+    }
+    lines.unshift("/// <reference types=\"cypress\" />");
   } else if (frameworkLower === 'selenium') {
-    chainResult = buildSeleniumLocatorChain(path, languageLower, indent, serial);
+    const driverVar = languageLower === 'python-class' ? 'self.driver' : 'driver';
+    chainResult = buildSeleniumLocatorChain(path, languageLower, indent, serial, driverVar);
   }
 
   if (!chainResult || !chainResult.finalVar) {
@@ -1427,15 +2500,15 @@ function buildManualActionCode(action, frameworkLower, languageLower, indent) {
 
   if (frameworkLower === 'playwright') {
     if (action.actionType === 'click') {
-      if (languageLower === 'python') {
+      if (pythonLike) {
         lines.push(`${indent}${targetVar}.click()`);
       } else {
         lines.push(`${indent}await ${targetVar}.click();`);
       }
     }
     if (action.actionType === 'extract_text') {
-      const resultName = sanitizeIdentifier(action.resultName, languageLower, languageLower === 'python' ? 'text_result' : 'textResult');
-      if (languageLower === 'python') {
+      const resultName = sanitizeIdentifier(action.resultName, languageLower, pythonLike ? 'text_result' : 'textResult');
+      if (pythonLike) {
         lines.push(`${indent}${resultName} = ${targetVar}.inner_text()`);
       } else {
         lines.push(`${indent}const ${resultName} = await ${targetVar}.innerText();`);
@@ -1443,8 +2516,8 @@ function buildManualActionCode(action, frameworkLower, languageLower, indent) {
     }
     if (action.actionType === 'get_attribute') {
       const attrName = action.attributeName || '';
-      const resultName = sanitizeIdentifier(action.resultName, languageLower, languageLower === 'python' ? `${attrName || 'attr'}_value` : `${attrName || 'attr'}Value`);
-      if (languageLower === 'python') {
+      const resultName = sanitizeIdentifier(action.resultName, languageLower, pythonLike ? `${attrName || 'attr'}_value` : `${attrName || 'attr'}Value`);
+      if (pythonLike) {
         lines.push(`${indent}${resultName} = ${targetVar}.get_attribute("${escapeForPythonString(attrName)}")`);
       } else {
         lines.push(`${indent}const ${resultName} = await ${targetVar}.getAttribute("${escapeForJSString(attrName)}");`);
@@ -1452,15 +2525,15 @@ function buildManualActionCode(action, frameworkLower, languageLower, indent) {
     }
   } else if (frameworkLower === 'selenium') {
     if (action.actionType === 'click') {
-      if (languageLower === 'python') {
+      if (pythonLike) {
         lines.push(`${indent}${targetVar}.click()`);
       } else {
         lines.push(`${indent}await ${targetVar}.click();`);
       }
     }
     if (action.actionType === 'extract_text') {
-      const resultName = sanitizeIdentifier(action.resultName, languageLower, languageLower === 'python' ? 'text_result' : 'textResult');
-      if (languageLower === 'python') {
+      const resultName = sanitizeIdentifier(action.resultName, languageLower, pythonLike ? 'text_result' : 'textResult');
+      if (pythonLike) {
         lines.push(`${indent}${resultName} = ${targetVar}.text`);
       } else {
         lines.push(`${indent}const ${resultName} = await ${targetVar}.getText();`);
@@ -1468,12 +2541,38 @@ function buildManualActionCode(action, frameworkLower, languageLower, indent) {
     }
     if (action.actionType === 'get_attribute') {
       const attrName = action.attributeName || '';
-      const resultName = sanitizeIdentifier(action.resultName, languageLower, languageLower === 'python' ? `${attrName || 'attr'}_value` : `${attrName || 'attr'}Value`);
-      if (languageLower === 'python') {
+      const resultName = sanitizeIdentifier(action.resultName, languageLower, pythonLike ? `${attrName || 'attr'}_value` : `${attrName || 'attr'}Value`);
+      if (pythonLike) {
         lines.push(`${indent}${resultName} = ${targetVar}.get_attribute("${escapeForPythonString(attrName)}")`);
       } else {
         lines.push(`${indent}const ${resultName} = await ${targetVar}.getAttribute("${escapeForJSString(attrName)}");`);
       }
+    }
+  } else if (frameworkLower === 'cypress') {
+    const targetEntry = path[path.length - 1];
+    const locatorExpr = buildCypressLocatorExpression(targetEntry, usageTracker);
+    if (!locatorExpr) {
+      return lines;
+    }
+    if (action.actionType === 'click') {
+      lines.push(`${indent}${locatorExpr}.click();`);
+    } else if (action.actionType === 'extract_text') {
+      const resultName = sanitizeIdentifier(action.resultName, 'javascript', 'textResult');
+      lines.push(`${indent}${locatorExpr}.invoke('text').then((text) => {`);
+      lines.push(`${indent}  cy.log('${escapeForJSString(resultName)}: ' + text.trim());`);
+      lines.push(`${indent}});`);
+    } else if (action.actionType === 'get_attribute') {
+      const attrName = action.attributeName || '';
+      const resultName = sanitizeIdentifier(action.resultName, 'javascript', `${attrName || 'attr'}Value`);
+      lines.push(`${indent}${locatorExpr}.invoke('attr', '${escapeForJSString(attrName)}').then((value) => {`);
+      lines.push(`${indent}  cy.log('${escapeForJSString(resultName)}: ' + value);`);
+      lines.push(`${indent}});`);
+    } else if (action.actionType === 'text') {
+      lines.push(`${indent}${locatorExpr}.invoke('text').then((text) => {`);
+      lines.push(`${indent}  cy.log('text: ' + text);`);
+      lines.push(`${indent}});`);
+    } else {
+      lines.push(`${indent}// Unsupported manual action "${action.actionType}" for Cypress`);
     }
   }
 
@@ -1490,7 +2589,13 @@ function buildSelectionPreviewLines(path, framework, language) {
     return buildPlaywrightLocatorChain(path, languageLower, indent, serial).lines;
   }
   if (frameworkLower === 'selenium') {
-    return buildSeleniumLocatorChain(path, languageLower, indent, serial).lines;
+    const driverVar = languageLower === 'python-class' ? 'self.driver' : 'driver';
+    return buildSeleniumLocatorChain(path, languageLower, indent, serial, driverVar).lines;
+  }
+  if (frameworkLower === 'cypress') {
+    const targetEntry = path[path.length - 1];
+    const expr = buildCypressLocatorExpression(targetEntry);
+    return expr ? [expr] : [];
   }
   return path.map((item) => item && item.selector ? item.selector : '');
 }
@@ -1617,6 +2722,7 @@ function sendReplayStep() {
       // 컨텐츠 스크립트가 아직 준비되지 않음 (탭 이동/새로고침 등)
       replayState.pending = false;
       replayState.awaitingContent = true;
+      ensureContentScriptInjected(replayState.tabId).catch(() => {});
       return;
     }
     if (!response) {
@@ -1670,9 +2776,12 @@ function handleReplayStepResult(msg) {
   scheduleNextStep(STEP_DELAY_MS);
 }
 
-document.getElementById('view-code').addEventListener('click', async ()=>{
-  updateCode();
-});
+const viewCodeBtn = document.getElementById('view-code');
+if (viewCodeBtn) {
+  viewCodeBtn.addEventListener('click', async () => {
+    updateCode({ preloadedEvents: allEvents });
+  });
+}
 
 document.getElementById('replay-btn').addEventListener('click', async ()=>{
   startReplay();
@@ -1685,7 +2794,7 @@ function startReplay() {
   }
   chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
     const events = res && res.events || [];
-    chrome.storage.local.get({manualActions: []}, (data) => {
+    chrome.storage.local.get({ manualActions: [], recordingStartUrl }, (data) => {
       const manualListRaw = Array.isArray(data.manualActions) ? data.manualActions : [];
       const manualList = manualListRaw.filter(Boolean);
       const replayQueue = buildReplayQueue(events, manualList);
@@ -1694,56 +2803,126 @@ function startReplay() {
         alert('재생할 이벤트가 없습니다.');
         return;
       }
-      
-      // 로그 초기화
+
+      const startUrl = typeof data.recordingStartUrl === 'string' && data.recordingStartUrl
+        ? data.recordingStartUrl
+        : (recordingStartUrl || '');
+      if (!startUrl) {
+        alert('녹화 시작 URL 정보를 찾을 수 없습니다. 먼저 새로 녹화를 진행한 뒤 다시 시도하세요.');
+        return;
+      }
+      recordingStartUrl = startUrl;
+      chrome.storage.local.set({ recordingStartUrl: startUrl });
+
       logEntries.innerHTML = '';
       const startMsg = document.createElement('div');
-      startMsg.textContent = `리플레이 시작: ${normalizedQueue.length}개 스텝`;
+      startMsg.textContent = `리플레이 시작 준비 중… (총 ${normalizedQueue.length}개 스텝)`;
       startMsg.style.color = '#2196f3';
       startMsg.style.fontWeight = 'bold';
       logEntries.appendChild(startMsg);
-      
-      // 현재 활성 탭 찾기
-      chrome.tabs.query({active:true, currentWindow:true}, (tabs) => {
-        if (!tabs[0]) {
-          alert('활성 탭을 찾을 수 없습니다.');
+
+      const prepareReplayOnTab = (targetTab) => {
+        if (!targetTab || typeof targetTab.id !== 'number') {
+          alert('리플레이용 탭 정보를 확인할 수 없습니다.');
           return;
         }
+        ensureContentScriptInjected(targetTab.id)
+          .then(() => {
+            ensureReplayTabListener();
+            listenEvents();
+            replayState.running = true;
+            replayState.events = normalizedQueue;
+            replayState.index = 0;
+            replayState.tabId = targetTab.id;
+            replayState.pending = false;
+            replayState.awaitingNavigation = false;
+            replayState.awaitingContent = false;
+            if (replayState.navigationGuard) {
+              clearTimeout(replayState.navigationGuard);
+              replayState.navigationGuard = null;
+            }
+            if (replayState.scheduledTimer) {
+              clearTimeout(replayState.scheduledTimer);
+              replayState.scheduledTimer = null;
+            }
+            sendReplayStep();
+          })
+          .catch((error) => {
+            console.error('[AI Test Recorder] Failed to inject content script for replay:', error);
+            alert('리플레이를 시작할 수 없습니다. 새로고침 후 다시 시도하거나, 페이지 접근 권한을 확인하세요.');
+          });
+      };
 
-        ensureReplayTabListener();
-        listenEvents();
-        replayState.running = true;
-        replayState.events = normalizedQueue;
-        replayState.index = 0;
-        replayState.tabId = tabs[0].id;
-        replayState.pending = false;
-        replayState.awaitingNavigation = false;
-        replayState.awaitingContent = false;
-        if (replayState.navigationGuard) {
-          clearTimeout(replayState.navigationGuard);
-          replayState.navigationGuard = null;
+      chrome.windows.create({ url: startUrl, focused: true, type: 'normal' }, (createdWindow) => {
+        if (chrome.runtime.lastError || !createdWindow) {
+          console.error('[AI Test Recorder] Failed to create replay window:', chrome.runtime.lastError);
+          alert('리플레이용 새 창을 열 수 없습니다. 팝업 차단 설정을 확인해 주세요.');
+          return;
         }
-        if (replayState.scheduledTimer) {
-          clearTimeout(replayState.scheduledTimer);
-          replayState.scheduledTimer = null;
-        }
-        sendReplayStep();
+        const resolveTabInfo = (win, callback) => {
+          if (win.tabs && win.tabs.length > 0) {
+            callback(win.tabs[0]);
+            return;
+          }
+          if (typeof win.id === 'number') {
+            chrome.tabs.query({ windowId: win.id, active: true }, (tabsArr) => {
+              callback(tabsArr && tabsArr[0] ? tabsArr[0] : null);
+            });
+          } else {
+            callback(null);
+          }
+        };
+        resolveTabInfo(createdWindow, (targetTab) => {
+          if (!targetTab) {
+            alert('리플레이용 탭을 확인할 수 없습니다.');
+            return;
+          }
+          prepareReplayOnTab(targetTab);
+        });
       });
     });
   });
 }
 
-function updateCode() {
-  chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
-    const events = (res && res.events || []).map((ev) => normalizeEventRecord(ev));
-    allEvents = events;
+function updateCode(options = {}) {
+  const {
+    refreshTimeline = false,
+    preserveSelection = false,
+    selectLast = false,
+    resetAiState = false,
+    preloadedEvents = null
+  } = options || {};
+
+  const handleEvents = (events) => {
+    let normalizedEvents;
+    if (refreshTimeline) {
+      normalizedEvents = syncTimelineFromEvents(events, {
+        preserveSelection,
+        selectLast,
+        resetAiState
+      });
+    } else {
+      normalizedEvents = Array.isArray(events) ? events.map((ev) => normalizeEventRecord(ev)) : [];
+      allEvents = normalizedEvents;
+    }
+
     loadManualActions(() => {
-      const code = generateCode(events, manualActions, selectedFramework, selectedLanguage);
+      const code = generateCode(normalizedEvents, manualActions, selectedFramework, selectedLanguage);
       if (codeOutput) {
         codeOutput.value = code;
       }
       updateSelectionCodePreview();
     });
+  };
+
+  if (Array.isArray(preloadedEvents)) {
+    handleEvents(preloadedEvents);
+    return;
+  }
+
+  chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
+    const events = (res && res.events) || [];
+    handleEvents(events);
   });
 }
 
@@ -1849,19 +3028,20 @@ function buildIframeCssSelector(ctx) {
   return 'iframe';
 }
 
-function buildPlaywrightFrameLocatorLines(ctx, languageLower, alias, indent) {
+function buildPlaywrightFrameLocatorLines(ctx, languageLower, alias, indent, baseVar = 'page') {
   const selector = buildIframeCssSelector(ctx);
-  if (languageLower === 'python') {
-    return [`${alias} = page.frame_locator("${escapeForDoubleQuotes(selector)}")`];
+  const pythonLike = languageLower === 'python' || languageLower === 'python-class';
+  if (pythonLike) {
+    return [`${alias} = ${baseVar}.frame_locator("${escapeForDoubleQuotes(selector)}")`];
   }
-  return [`const ${alias} = page.frameLocator('${selector}');`];
+  return [`const ${alias} = ${baseVar}.frameLocator('${selector}');`];
 }
 
-function buildSeleniumFrameSwitchPython(ctx) {
+function buildSeleniumFrameSwitchPython(ctx, driverVar = 'driver') {
   if (!ctx) return null;
-  if (ctx.name) return `driver.switch_to.frame("${ctx.name}")`;
-  if (ctx.id) return `driver.switch_to.frame(driver.find_element(By.CSS_SELECTOR, "iframe#${ctx.id}"))`;
-  if (ctx.src) return `driver.switch_to.frame(driver.find_element(By.CSS_SELECTOR, "iframe[src='${ctx.src}']"))`;
+  if (ctx.name) return `${driverVar}.switch_to.frame("${ctx.name}")`;
+  if (ctx.id) return `${driverVar}.switch_to.frame(${driverVar}.find_element(By.CSS_SELECTOR, "iframe#${ctx.id}"))`;
+  if (ctx.src) return `${driverVar}.switch_to.frame(${driverVar}.find_element(By.CSS_SELECTOR, "iframe[src='${ctx.src}']"))`;
   return null;
 }
 
@@ -1879,7 +3059,8 @@ function buildSeleniumFrameSwitchTS(ctx) {
 
 function buildPlaywrightLocatorExpression(base, selection, languageLower) {
   const selectorType = selection.type || inferSelectorType(selection.selector);
-  if (languageLower === 'python') {
+  const pythonLike = languageLower === 'python' || languageLower === 'python-class';
+  if (pythonLike) {
     if (selectorType === 'text') {
       const textVal = getTextValue(selection);
       if (textVal) {
@@ -2020,17 +3201,17 @@ function buildPlaywrightJSAction(ev, selectorInfo, base = 'page') {
   return null;
 }
 
-function buildSeleniumPythonAction(ev, selectorInfo) {
+function buildSeleniumPythonAction(ev, selectorInfo, driverVar = 'driver') {
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
   const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
   const value = escapeForPythonString(ev.value || '');
   if (selectorType === 'xpath') {
     const xpath = escapeForPythonString(getXPathValue(selectorInfo));
     if (ev.action === 'click') {
-      return `driver.find_element(By.XPATH, "${xpath}").click()`;
+      return `${driverVar}.find_element(By.XPATH, "${xpath}").click()`;
     }
     if (ev.action === 'input') {
-      return `driver.find_element(By.XPATH, "${xpath}").send_keys("${value}")`;
+      return `${driverVar}.find_element(By.XPATH, "${xpath}").send_keys("${value}")`;
     }
   }
   if (selectorType === 'text') {
@@ -2042,19 +3223,19 @@ function buildSeleniumPythonAction(ev, selectorInfo) {
         : `//*[contains(normalize-space(.), "${textVal}")]`;
       const escapedExpr = escapeForPythonString(expr);
       if (ev.action === 'click') {
-        return `driver.find_element(By.XPATH, "${escapedExpr}").click()`;
+        return `${driverVar}.find_element(By.XPATH, "${escapedExpr}").click()`;
       }
       if (ev.action === 'input') {
-        return `driver.find_element(By.XPATH, "${escapedExpr}").send_keys("${value}")`;
+        return `${driverVar}.find_element(By.XPATH, "${escapedExpr}").send_keys("${value}")`;
       }
     }
   }
   const cssSelector = escapeForPythonString(selectorInfo.selector);
   if (ev.action === 'click') {
-    return `driver.find_element(By.CSS_SELECTOR, "${cssSelector}").click()`;
+    return `${driverVar}.find_element(By.CSS_SELECTOR, "${cssSelector}").click()`;
   }
   if (ev.action === 'input') {
-    return `driver.find_element(By.CSS_SELECTOR, "${cssSelector}").send_keys("${value}")`;
+    return `${driverVar}.find_element(By.CSS_SELECTOR, "${cssSelector}").send_keys("${value}")`;
   }
   return null;
 }
@@ -2098,6 +3279,47 @@ function buildSeleniumJSAction(ev, selectorInfo) {
   return null;
 }
 
+function buildCypressLocatorExpression(selection, usageTracker) {
+  if (!selection || !selection.selector) return null;
+  const selectorType = selection.type || inferSelectorType(selection.selector);
+  if (selectorType === 'text') {
+    const textVal = getTextValue(selection);
+    if (!textVal) return null;
+    return `cy.contains("${escapeForJSString(textVal)}")`;
+  }
+  if (selectorType === 'xpath') {
+    if (usageTracker) {
+      usageTracker.usesXPath = true;
+    }
+    const xpath = escapeForJSString(getXPathValue(selection));
+    return `cy.xpath("${xpath}")`;
+  }
+  const selector = escapeForJSString(getSelectorCore(selection.selector));
+  if (!selector) return null;
+  return `cy.get("${selector}")`;
+}
+
+function buildCypressAction(ev, selectorInfo, options = {}) {
+  if (!ev || !selectorInfo) return null;
+  const usageTracker = options.usage || null;
+  const locatorExpr = buildCypressLocatorExpression(selectorInfo, usageTracker);
+  if (!locatorExpr) return null;
+  const value = escapeForJSString(ev.value || '');
+  if (ev.action === 'click') {
+    return `${locatorExpr}.click();`;
+  }
+  if (ev.action === 'input') {
+    if (value) {
+      return `${locatorExpr}.clear().type("${value}");`;
+    }
+    return `${locatorExpr}.clear();`;
+  }
+  if (ev.action === 'change' && value) {
+    return `${locatorExpr}.clear().type("${value}");`;
+  }
+  return null;
+}
+
 function generateCode(events, manualList, framework, language) {
   const lines = [];
   const frameworkLower = (framework || '').toLowerCase();
@@ -2123,7 +3345,7 @@ function generateCode(events, manualList, framework, language) {
             if (targetFrame) {
               frameLocatorIndex += 1;
               const alias = `frame_locator_${frameLocatorIndex}`;
-              const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ');
+              const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ', 'page');
               setupLines.forEach(line => lines.push(`  ${line}`));
               currentBase = alias;
               currentFrameContext = targetFrame;
@@ -2141,6 +3363,59 @@ function generateCode(events, manualList, framework, language) {
         }
       });
       lines.push("  browser.close()");
+    } else if (languageLower === 'python-class') {
+      lines.push("from playwright.sync_api import sync_playwright");
+      lines.push("");
+      lines.push("class GeneratedTestCase:");
+      lines.push("  def __init__(self, page):");
+      lines.push("    self.page = page");
+      lines.push("");
+      lines.push("  def run(self):");
+      let currentFrameContext = null;
+      let frameLocatorIndex = 0;
+      let currentBase = 'self.page';
+      let hasEmittedAction = false;
+      timeline.forEach((entry) => {
+        if (entry.kind === 'event') {
+          const { event, selectorInfo } = entry;
+          const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
+          if (!framesEqual(targetFrame, currentFrameContext)) {
+            if (targetFrame) {
+              frameLocatorIndex += 1;
+              const alias = `self.frame_locator_${frameLocatorIndex}`;
+              const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '    ', 'self.page');
+              setupLines.forEach((line) => lines.push(`    ${line}`));
+              currentBase = alias;
+              currentFrameContext = targetFrame;
+            } else {
+              currentBase = 'self.page';
+              currentFrameContext = null;
+            }
+          }
+          const actionLine = buildPlaywrightPythonAction(event, selectorInfo, currentBase);
+          if (actionLine) {
+            lines.push(`    ${actionLine}`);
+            hasEmittedAction = true;
+          }
+        } else if (entry.kind === 'manual') {
+          emitManualActionLines(lines, entry.action, frameworkLower, languageLower, '    ');
+          hasEmittedAction = true;
+        }
+      });
+      if (!hasEmittedAction) {
+        lines.push("    pass");
+      }
+      lines.push("");
+      lines.push("def run_test():");
+      lines.push("  with sync_playwright() as p:");
+      lines.push("    browser = p.chromium.launch(headless=False)");
+      lines.push("    page = browser.new_page()");
+      lines.push("    test_case = GeneratedTestCase(page)");
+      lines.push("    test_case.run()");
+      lines.push("    browser.close()");
+      lines.push("");
+      lines.push("if __name__ == \"__main__\":");
+      lines.push("  run_test()");
     } else if (languageLower === 'javascript') {
       lines.push("const { chromium } = require('playwright');");
       lines.push("");
@@ -2158,7 +3433,7 @@ function generateCode(events, manualList, framework, language) {
             if (targetFrame) {
               frameLocatorIndex += 1;
               const alias = `frameLocator${frameLocatorIndex}`;
-              const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ');
+              const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ', 'page');
               setupLines.forEach(line => lines.push(`  ${line}`));
               currentBase = alias;
               currentFrameContext = targetFrame;
@@ -2194,7 +3469,7 @@ function generateCode(events, manualList, framework, language) {
             if (targetFrame) {
               frameLocatorIndex += 1;
               const alias = `frameLocator${frameLocatorIndex}`;
-              const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ');
+              const setupLines = buildPlaywrightFrameLocatorLines(targetFrame, languageLower, alias, '  ', 'page');
               setupLines.forEach(line => lines.push(`  ${line}`));
               currentBase = alias;
               currentFrameContext = targetFrame;
@@ -2245,6 +3520,58 @@ function generateCode(events, manualList, framework, language) {
         }
       });
       lines.push("driver.quit()");
+    } else if (languageLower === 'python-class') {
+      lines.push("from selenium import webdriver");
+      lines.push("from selenium.webdriver.common.by import By");
+      lines.push("");
+      lines.push("class GeneratedTestCase:");
+      lines.push("  def __init__(self, driver):");
+      lines.push("    self.driver = driver");
+      lines.push("");
+      lines.push("  def run(self):");
+      lines.push("    self.driver.get('REPLACE_URL')");
+      let currentFrame = null;
+      let hasAction = false;
+      timeline.forEach((entry) => {
+        if (entry.kind === 'event') {
+          const { event, selectorInfo } = entry;
+          const targetFrame = selectorInfo && selectorInfo.iframeContext ? selectorInfo.iframeContext : null;
+          if (targetFrame) {
+            const switchLine = buildSeleniumFrameSwitchPython(targetFrame, 'self.driver');
+            if (switchLine) {
+              lines.push(`    ${switchLine}`);
+              currentFrame = targetFrame;
+              hasAction = true;
+            }
+          } else if (currentFrame) {
+            lines.push('    self.driver.switch_to.default_content()');
+            currentFrame = null;
+            hasAction = true;
+          }
+          const actionLine = buildSeleniumPythonAction(event, selectorInfo, 'self.driver');
+          if (actionLine) {
+            lines.push(`    ${actionLine}`);
+            hasAction = true;
+          }
+        } else if (entry.kind === 'manual') {
+          emitManualActionLines(lines, entry.action, frameworkLower, languageLower, '    ');
+          hasAction = true;
+        }
+      });
+      if (!hasAction) {
+        lines.push("    pass");
+      }
+      lines.push("");
+      lines.push("def run_test():");
+      lines.push("  driver = webdriver.Chrome()");
+      lines.push("  try:");
+      lines.push("    test_case = GeneratedTestCase(driver)");
+      lines.push("    test_case.run()");
+      lines.push("  finally:");
+      lines.push("    driver.quit()");
+      lines.push("");
+      lines.push("if __name__ == \"__main__\":");
+      lines.push("  run_test()");
     } else if (languageLower === 'javascript') {
       lines.push("const { Builder, By } = require('selenium-webdriver');");
       lines.push("const chrome = require('selenium-webdriver/chrome');");

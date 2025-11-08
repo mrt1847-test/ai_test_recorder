@@ -2,6 +2,7 @@ import { createEventRecord } from '../events/schema.js';
 import { getIframeContext, getSelectorCandidates } from '../selectors/index.js';
 import { elementSelectionState, inputTimers, recorderState } from '../state.js';
 import { ensureRecordingState, removeHighlight } from '../overlay/index.js';
+import { buildDomContextSnapshot } from '../utils/dom.js';
 
 const INPUT_DEBOUNCE_DELAY = 800;
 
@@ -31,6 +32,7 @@ function buildEventForTarget({ action, target, value = null }) {
   const iframeContext = getIframeContext(target);
   const clientRect = buildClientRect(target);
   const metadata = { domEvent: action };
+  const domContext = buildDomContextSnapshot(target);
   const eventRecord = createEventRecord({
     action,
     value,
@@ -38,12 +40,14 @@ function buildEventForTarget({ action, target, value = null }) {
     target,
     iframeContext,
     clientRect,
-    metadata
+    metadata,
+    domContext
   });
   return {
     ...eventRecord,
     selectorCandidates: selectors,
     iframeContext,
+    domContext,
     tag: target && target.tagName ? target.tagName : null
   };
 }
@@ -97,10 +101,24 @@ function handleBlur(event) {
   }
 }
 
-export function startRecording() {
+export function startRecording(options = {}) {
+  const { resetEvents = true } = options;
+  if (recorderState.isRecording) {
+    ensureRecordingState(true);
+    if (resetEvents) {
+      chrome.storage.local.set({ events: [], recording: true });
+    } else {
+      chrome.storage.local.set({ recording: true });
+    }
+    return;
+  }
   recorderState.isRecording = true;
   ensureRecordingState(true);
-  chrome.storage.local.set({ events: [], recording: true });
+  if (resetEvents) {
+    chrome.storage.local.set({ events: [], recording: true });
+  } else {
+    chrome.storage.local.set({ recording: true });
+  }
   removeHighlight();
 }
 

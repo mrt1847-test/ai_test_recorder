@@ -19,20 +19,43 @@
           <input id="test-url" placeholder="https://example.com"/>
         </label>
       </div>
+      <div class="toolbar-row ai-config">
+        <label class="toolbar-field" for="ai-endpoint">
+          <span class="toolbar-label">AI Selector API Endpoint</span>
+          <input id="ai-endpoint" placeholder="https://api.example.com/selectors" autocomplete="off" />
+        </label>
+        <label class="toolbar-field" for="ai-api-key">
+          <span class="toolbar-label">AI API 키</span>
+          <input id="ai-api-key" type="password" placeholder="API 키를 입력하세요" autocomplete="off" />
+        </label>
+        <label class="toolbar-field" for="ai-model">
+          <span class="toolbar-label">AI 모델 (선택)</span>
+          <input id="ai-model" placeholder="예: gpt-4.1-mini" autocomplete="off" />
+        </label>
+        <div class="toolbar-field ai-config-actions">
+          <span class="toolbar-label">AI 설정</span>
+          <button id="ai-settings-save" class="toolbar-btn">저장</button>
+          <span id="ai-settings-status" class="ai-settings-status"></span>
+        </div>
+      </div>
       <div class="toolbar-row selects" role="group" aria-label="환경 설정">
         <label class="toolbar-field" for="framework-select">
           <span class="toolbar-label">자동화 프레임워크</span>
           <select id="framework-select">
             <option value="playwright">Playwright</option>
             <option value="selenium">Selenium</option>
+            <option value="cypress">Cypress</option>
           </select>
         </label>
         <label class="toolbar-field" for="language-select">
           <span class="toolbar-label">언어</span>
           <select id="language-select">
             <option value="python">Python</option>
+            <option value="python-class">Python (Class)</option>
             <option value="javascript">JavaScript</option>
             <option value="typescript">TypeScript</option>
+            <option value="cypress-javascript">Cypress (JavaScript)</option>
+            <option value="cypress-typescript">Cypress (TypeScript)</option>
           </select>
         </label>
       </div>
@@ -41,6 +64,7 @@
         <button id="stop-record" class="toolbar-btn" disabled>Stop</button>
         <button id="replay-btn" class="toolbar-btn">Replay</button>
         <button id="element-select-btn" class="toolbar-btn">요소 선택</button>
+        <button id="overlay-toggle-btn" class="toolbar-btn" aria-pressed="false">오버레이 표시</button>
         <button id="reset-btn" class="toolbar-btn">초기화</button>
       </div>
     </div>
@@ -90,7 +114,18 @@
           <pre><code id="element-code"></code></pre>
         </div>
       </div>
-      <div id="code-area"><h4>Code Preview</h4><textarea id="code-output" class="code-output" spellcheck="false"></textarea></div>
+      <div id="code-area">
+        <div class="code-area-header">
+          <h4>Code Preview</h4>
+          <div class="code-review-controls">
+            <button id="ai-review-btn" class="toolbar-btn">AI 검토</button>
+            <span id="ai-review-status" class="code-review-status"></span>
+          </div>
+        </div>
+        <textarea id="code-output" class="code-output" spellcheck="false"></textarea>
+        <div id="code-review-summary" class="code-review-summary hidden"></div>
+        <div id="code-review-diff" class="code-review-diff hidden"></div>
+      </div>
       <div id="replay-log"><h4>Replay Log</h4><div id="log-entries"></div></div>
     </div>
   </div>

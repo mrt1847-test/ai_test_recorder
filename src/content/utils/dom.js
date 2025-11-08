@@ -316,3 +316,114 @@ export function countMatchesForSelector(parsed, root, options = {}) {
   }
 }
 
+const CONTEXT_ATTRIBUTE_KEYS = [
+  'data-testid',
+  'data-test',
+  'data-qa',
+  'data-cy',
+  'data-id',
+  'aria-label',
+  'role',
+  'name',
+  'type',
+  'alt',
+  'title'
+];
+
+function pickContextAttributes(element) {
+  const attrs = {};
+  CONTEXT_ATTRIBUTE_KEYS.forEach((key) => {
+    const value = element.getAttribute && element.getAttribute(key);
+    if (value) {
+      attrs[key] = value;
+    }
+  });
+  return attrs;
+}
+
+function getElementPositionInfo(element) {
+  const parent = element.parentElement;
+  let index = 0;
+  let nthOfType = 0;
+  let total = 1;
+  if (parent) {
+    const children = Array.from(parent.children || []);
+    total = children.length;
+    index = children.indexOf(element);
+    nthOfType = children
+      .slice(0, index + 1)
+      .filter((el) => el.tagName === element.tagName).length;
+  } else {
+    nthOfType = 1;
+  }
+  return {
+    index,
+    total,
+    nthOfType
+  };
+}
+
+function summarizeElementForContext(element) {
+  if (!element || element.nodeType !== 1) return null;
+  const summary = {
+    tag: element.tagName ? element.tagName.toLowerCase() : ''
+  };
+  if (element.id) {
+    summary.id = element.id;
+  }
+  const classes = Array.from(element.classList || []).slice(0, 5);
+  if (classes.length) {
+    summary.classes = classes;
+  }
+  const attrs = pickContextAttributes(element);
+  if (Object.keys(attrs).length > 0) {
+    summary.attributes = attrs;
+  }
+  const rawText = normalizeText((element.innerText || element.textContent || '').trim());
+  if (rawText) {
+    summary.text = rawText.length > 80 ? `${rawText.slice(0, 77)}…` : rawText;
+  }
+  summary.childCount = element.children ? element.children.length : 0;
+  summary.position = getElementPositionInfo(element);
+  return summary;
+}
+
+export function buildDomContextSnapshot(element, options = {}) {
+  if (!element || element.nodeType !== 1) {
+    return {
+      ancestors: [],
+      children: []
+    };
+  }
+  const {
+    maxAncestors = 4,
+    maxChildren = 6,
+    includeSelf = false
+  } = options;
+
+  const ancestors = [];
+  let current = element.parentElement;
+  while (current && ancestors.length < maxAncestors) {
+    const summary = summarizeElementForContext(current);
+    if (summary) {
+      ancestors.push(summary);
+    }
+    current = current.parentElement;
+  }
+
+  const children = [];
+  const childElements = Array.from(element.children || []);
+  childElements.slice(0, maxChildren).forEach((child) => {
+    const summary = summarizeElementForContext(child);
+    if (summary) {
+      children.push(summary);
+    }
+  });
+
+  return {
+    self: includeSelf ? summarizeElementForContext(element) : undefined,
+    ancestors,
+    children
+  };
+}
+

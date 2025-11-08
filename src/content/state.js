@@ -22,6 +22,8 @@ export const overlayControlsState = {
   handle: null,
   buttons: {},
   status: null,
+  closeButton: null,
+  visible: false,
   dragging: false,
   dragOffsetX: 0,
   dragOffsetY: 0

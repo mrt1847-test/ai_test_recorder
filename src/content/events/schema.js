@@ -21,6 +21,7 @@ export function createEventRecord({
   value = null,
   selectors = [],
   target = null,
+  domContext = null,
   iframeContext = null,
   clientRect = null,
   metadata = {},
@@ -51,7 +52,8 @@ export function createEventRecord({
           tag: targetTag,
           id: target.id || null,
           classes: target.classList ? Array.from(target.classList) : [],
-          text: (target.innerText || target.textContent || '').trim().slice(0, 200)
+          text: (target.innerText || target.textContent || '').trim().slice(0, 200),
+          domContext: domContext
         }
       : null,
     clientRect,
