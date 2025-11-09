@@ -100,7 +100,8 @@ function initCodeEditor() {
   if (!codeOutput || typeof CodeMirror !== 'function') return;
   codeEditor = CodeMirror.fromTextArea(codeOutput, {
     lineNumbers: true,
-    theme: 'neo'
+    theme: 'neo',
+    scrollbarStyle: 'native'
   });
   refreshCodeEditorMode();
   codeEditor.setSize('100%', 'auto');

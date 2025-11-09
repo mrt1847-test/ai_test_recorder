@@ -2189,6 +2189,7 @@
       selectorCandidates,
       iframeContext,
       page: {
+        // 이벤트가 발생한 페이지의 URL/타이틀을 저장해 재현에 도움을 준다.
         url: window.location.href,
         title: document.title
       },
@@ -2209,6 +2210,7 @@
         ...metadata
       },
       manual: manual || null,
+      // primary selector 관련 필드들을 최상위에 병합한다.
       ...primaryData
     };
   }
@@ -2396,6 +2398,7 @@
             return;
           }
           case "ELEMENT_SELECTION_CANCEL": {
+            cancelSelection();
             cancelSelection();
             chrome.runtime.sendMessage({ type: "ELEMENT_SELECTION_CANCELLED" });
             sendResponse({ ok: true });

@@ -36,7 +36,7 @@ select:focus{outline:none;border-color:#0ea5a0;box-shadow:0 0 0 2px rgba(14,165,
 @media (max-width:560px){
   .toolbar-row.selects{flex-direction:column;align-items:stretch}
 }
-#code-area{background:#fff;border-radius:12px;padding:12px;box-shadow:0 6px 18px rgba(15,23,42,0.08);border:1px solid #e0e6f0;display:flex;flex-direction:column;gap:10px;width:100%;box-sizing:border-box}
+#code-area{background:#fff;border-radius:12px;padding:12px;box-shadow:0 6px 18px rgba(15,23,42,0.08);border:1px solid #e0e6f0;display:flex;flex-direction:column;gap:10px;width:100%;box-sizing:border-box;overflow-x:hidden}
 .code-area-header{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .code-review-controls{display:flex;align-items:center;gap:8px}
 .ai-review-btn-wrapper{position:relative;display:inline-flex}
@@ -72,7 +72,7 @@ select:focus{outline:none;border-color:#0ea5a0;box-shadow:0 0 0 2px rgba(14,165,
 .code-diff-line.removed{background:rgba(248,113,113,0.2);color:#fecaca}
 .code-diff-line.changed{background:rgba(250,204,21,0.18);color:#fef3c7}
 .code-diff-line.context{opacity:0.4;font-style:italic}
-#code-editor{border:1px solid #d0d7e2;border-radius:10px;background:#fff}
+#code-editor{border:1px solid #d0d7e2;border-radius:10px;background:#fff;overflow:hidden}
 #code-editor .CodeMirror{min-height:320px;height:auto;font-family:"Fira Code",Consolas,"Courier New",monospace;font-size:15px;line-height:1.6}
 #code-editor .CodeMirror-focused{outline:none}
 #main-top{display:flex;gap:12px;align-items:flex-start}

@@ -1,8 +1,17 @@
+/**
+ * DevTools 패널에서 요청한 리플레이/선택 동작을 실제 DOM에 적용한다.
+ * - 녹화된 이벤트 재생
+ * - 선택 워크플로우 내 즉시 실행 액션
+ */
 import { findElementByPath, getSelectorCore, locateElementForEvent } from '../dom/locator.js';
 
+/**
+ * 녹화된 단일 이벤트를 실제 DOM에 재적용하고 결과를 DevTools로 통지한다.
+ */
 export async function executeReplayStep({ event, index = 0, total = 0, timeoutMs = 6000 }) {
   const { element, info } = await locateElementForEvent(event, timeoutMs);
   if (!element) {
+    // 요소를 찾지 못했으면 즉시 실패 메시지를 보낸다.
     const payload = {
       type: 'REPLAY_STEP_RESULT',
       ok: false,
@@ -18,6 +27,7 @@ export async function executeReplayStep({ event, index = 0, total = 0, timeoutMs
 
   let navigationTriggered = false;
   const beforeUnloadHandler = () => {
+    // 리플레이 중 네비게이션이 발생했는지를 기록해 전달한다.
     navigationTriggered = true;
   };
   window.addEventListener('beforeunload', beforeUnloadHandler);
@@ -42,6 +52,7 @@ export async function executeReplayStep({ event, index = 0, total = 0, timeoutMs
         // ignore
       }
     }
+    // 현재 실행 중인 이벤트임을 눈에 띄게 표시한다.
     element.style.outline = '3px solid rgba(0,150,136,0.6)';
     element.style.outlineOffset = '2px';
 
@@ -124,6 +135,7 @@ export function executeSelectionAction(action, path) {
   if (action === 'click') {
     try {
       target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // highlight 완료 후 잠시 대기한 뒤 실제 클릭 이벤트를 송출한다.
       setTimeout(() => {
         try {
           target.focus({ preventScroll: true });

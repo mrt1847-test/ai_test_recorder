@@ -1,3 +1,7 @@
+/**
+ * 콘텐츠 스크립트 전역 상태를 모아두는 단순 스토리지.
+ * 다른 모듈에서 직접 import하여 참조한다.
+ */
 export const recorderState = {
   isRecording: false,
   currentHighlightedElement: null,

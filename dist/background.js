@@ -1,8 +1,18 @@
+/**
+ * 확장 프로그램의 백그라운드 서비스 워커.
+ * - DevTools 패널과 콘텐츠 스크립트 간 메시지 라우팅
+ * - AI 셀렉터/코드리뷰 API 호출 및 응답 정규화
+ * - 탭 상태 관리 및 콘텐츠 스크립트 주입
+ */
 const injectedTabs = new Set();
 const manifest = chrome.runtime.getManifest ? chrome.runtime.getManifest() : null;
 const EXTENSION_VERSION = manifest && manifest.version ? manifest.version : '0.0.0';
 const AI_REQUEST_TIMEOUT_MS = 25000;
 
+/**
+ * chrome.storage.local에 저장된 사용자 AI 설정을 읽어온다.
+ * @returns {Promise<{ endpoint: string, apiKey: string, model: string }>}
+ */
 function getAiSettings() {
   return new Promise((resolve) => {
     chrome.storage.local.get({ aiSettings: { endpoint: '', apiKey: '', model: '' } }, (res) => {
@@ -16,6 +26,11 @@ function getAiSettings() {
   });
 }
 
+/**
+ * 순환 참조나 함수가 포함된 객체를 보낼 수 있도록 JSON-safe 복사본을 만든다.
+ * @param {*} data
+ * @returns {*}
+ */
 function sanitizeForTransport(data) {
   try {
     return JSON.parse(JSON.stringify(data, (key, value) => {
@@ -29,10 +44,20 @@ function sanitizeForTransport(data) {
   }
 }
 
+/**
+ * API 요청 추적을 위한 고유 요청 ID를 생성한다.
+ * @returns {string}
+ */
 function generateRequestId() {
   return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * AI 응답과 같은 텍스트에서 JSON을 추출/파싱한다.
+ * 마크다운 fenced code 혹은 JSON 유사 문자열을 모두 시도한다.
+ * @param {string} text
+ * @returns {*|null}
+ */
 function parseJsonFromText(text) {
   if (typeof text !== 'string') return null;
   const trimmed = text.trim();
@@ -60,6 +85,13 @@ function parseJsonFromText(text) {
   return null;
 }
 
+/**
+ * DevTools 패널에서 전달받은 이벤트/컨텍스트를 기반으로 AI 추천 요청 페이로드를 조립한다.
+ * @param {object} eventPayload
+ * @param {object} contextPayload
+ * @param {{endpoint: string, apiKey: string, model: string}} settings
+ * @returns {object}
+ */
 function buildAiRequestBody(eventPayload, contextPayload, settings) {
   const sanitizedEvent = sanitizeForTransport(eventPayload) || {};
   const context = contextPayload && typeof contextPayload === 'object' ? contextPayload : {};
@@ -102,6 +134,12 @@ function buildAiRequestBody(eventPayload, contextPayload, settings) {
   };
 }
 
+/**
+ * 코드 리뷰 요청 메시지를 AI 서버에 전송할 수 있는 형태로 구성한다.
+ * @param {object} message
+ * @param {{endpoint: string, apiKey: string, model: string}} settings
+ * @returns {object}
+ */
 function buildAiCodeReviewRequestBody(message, settings) {
   const resolvedModel = (settings && settings.model) || '';
   const {
@@ -143,6 +181,11 @@ function buildAiCodeReviewRequestBody(message, settings) {
   };
 }
 
+/**
+ * 다양한 포맷의 후보 셀렉터 정보를 내부 표준 포맷으로 변환한다.
+ * @param {*} entry
+ * @returns {object|null}
+ */
 function coerceAiCandidate(entry) {
   if (!entry) return null;
   if (typeof entry === 'string') {
@@ -216,6 +259,12 @@ function coerceAiCandidate(entry) {
   return candidate;
 }
 
+/**
+ * AI 응답 객체에서 셀렉터 후보 목록을 재귀적으로 수집한다.
+ * @param {*} source
+ * @param {Array} target
+ * @param {Set<object>} visited
+ */
 function collectCandidatesFromSource(source, target, visited = new Set()) {
   if (!source) return;
   if (typeof source === 'object' && source !== null) {
@@ -262,6 +311,11 @@ function collectCandidatesFromSource(source, target, visited = new Set()) {
   });
 }
 
+/**
+ * 중복 셀렉터 후보를 제거하고 공백을 정리한다.
+ * @param {Array<object>} candidates
+ * @returns {Array<object>}
+ */
 function dedupeCandidates(candidates) {
   const seen = new Set();
   return candidates.filter((candidate) => {
@@ -276,6 +330,11 @@ function dedupeCandidates(candidates) {
   });
 }
 
+/**
+ * AI 셀렉터 응답을 내부 표준 형태로 정규화한다.
+ * @param {*} raw
+ * @returns {{candidates: Array<object>}}
+ */
 function normalizeAiResponse(raw) {
   const collected = [];
   collectCandidatesFromSource(raw, collected);
@@ -296,6 +355,12 @@ function normalizeAiResponse(raw) {
   };
 }
 
+/**
+ * AI 코드 리뷰 응답 JSON을 DevTools 패널에서 사용하는 구조로 정리한다.
+ * @param {*} raw
+ * @param {string} fallbackCode
+ * @returns {{ok: boolean, updatedCode: string, summary: string, suggestions: Array}}
+ */
 function normalizeAiCodeReviewResponse(raw, fallbackCode) {
   const base = raw && typeof raw === 'object' ? raw : {};
   const container = base.result && typeof base.result === 'object' ? base.result : base;
@@ -322,6 +387,12 @@ function normalizeAiCodeReviewResponse(raw, fallbackCode) {
   };
 }
 
+/**
+ * 지정한 탭에서 후보 셀렉터를 검증하여 일치 개수를 확인한다.
+ * @param {number|null} tabId
+ * @param {Array<object>} candidates
+ * @returns {Promise<Array|null>}
+ */
 function evaluateCandidatesOnPage(tabId, candidates) {
   return new Promise((resolve) => {
     if (typeof tabId !== 'number' || !Array.isArray(candidates) || candidates.length === 0) {
@@ -343,16 +414,24 @@ function evaluateCandidatesOnPage(tabId, candidates) {
   });
 }
 
+/**
+ * DevTools 패널에서 받은 셀렉터 추천 요청을 처리하고 AI 응답을 정규화한다.
+ * @param {object} message
+ * @param {Function} sendResponse
+ */
 async function handleAiSelectorRequest(message, sendResponse) {
   try {
     const settings = await getAiSettings();
+    // AI 엔드포인트가 설정되지 않았다면 즉시 실패 응답을 돌려준다.
     if (!settings.endpoint) {
+      // 엔드포인트가 없으면 호출할 수 없으니 즉시 실패를 반환.
       sendResponse({ ok: false, reason: 'AI API 엔드포인트가 설정되지 않았습니다.' });
       return;
     }
     const eventPayload = message && typeof message === 'object' ? message.event : null;
     const contextPayload = message && typeof message === 'object' && message.context ? message.context : {};
     const requestBody = buildAiRequestBody(eventPayload, contextPayload, settings);
+    // 요청 바디 구성이 실패한 경우에도 오류를 반환한다.
     if (!requestBody) {
       sendResponse({ ok: false, reason: 'AI 요청 페이로드를 준비할 수 없습니다.' });
       return;
@@ -362,6 +441,7 @@ async function handleAiSelectorRequest(message, sendResponse) {
       'Content-Type': 'application/json',
       Accept: 'application/json'
     };
+    // API 키가 존재한다면 Authorization 및 x-api-key 헤더를 모두 채운다.
     if (settings.apiKey) {
       headers.Authorization = `Bearer ${settings.apiKey}`;
       headers['x-api-key'] = settings.apiKey;
@@ -370,6 +450,7 @@ async function handleAiSelectorRequest(message, sendResponse) {
     const timer = controller ? setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS) : null;
     let response;
     try {
+      // 네트워크 요청을 시도하고 타임아웃 컨트롤러가 있다면 연결한다.
       response = await fetch(settings.endpoint, {
         method: 'POST',
         headers,
@@ -379,9 +460,11 @@ async function handleAiSelectorRequest(message, sendResponse) {
     } finally {
       if (timer) clearTimeout(timer);
     }
+    // HTTP 에러 응답일 경우 body에서 추가 메시지를 추출한다.
     if (!response.ok) {
       let errorMessage = `AI API 호출 실패 (HTTP ${response.status})`;
       try {
+        // 응답 본문이 JSON일 수도 있으니 가능한 한 상세한 오류 메시지를 만든다.
         const errorText = await response.text();
         if (errorText) {
           try {
@@ -415,6 +498,7 @@ async function handleAiSelectorRequest(message, sendResponse) {
     }
     let parsed = null;
     if (rawText) {
+      // 순수 JSON이 아닐 수도 있으니 JSON.parse를 한 번 더 시도한다.
       try {
         parsed = JSON.parse(rawText);
       } catch (err) {
@@ -422,6 +506,7 @@ async function handleAiSelectorRequest(message, sendResponse) {
       }
     }
     const { candidates } = normalizeAiResponse(parsed);
+    // 후보가 하나도 없다면 유저에게 의미 있는 메시지를 전달한다.
     if (!candidates || candidates.length === 0) {
       sendResponse({ ok: false, reason: 'AI 응답에 셀렉터 후보가 없습니다.' });
       return;
@@ -429,8 +514,10 @@ async function handleAiSelectorRequest(message, sendResponse) {
     let enrichedCandidates = candidates.map((candidate) => ({ ...candidate }));
     const evaluationResults = await evaluateCandidatesOnPage(targetTabId, enrichedCandidates);
     if (Array.isArray(evaluationResults)) {
+      // 후보별로 매칭 결과를 병합하기 쉽게 selector/type 키를 map에 저장한다.
       const map = new Map();
       evaluationResults.forEach((result) => {
+        // selector::type을 키로 삼아 이후에 빠르게 lookup한다.
         if (!result || typeof result.selector !== 'string') return;
         const key = `${result.selector}::${result.type || ''}`;
         map.set(key, result);
@@ -485,6 +572,11 @@ async function handleAiSelectorRequest(message, sendResponse) {
   }
 }
 
+/**
+ * AI 코드 리뷰 API를 호출하고 DevTools 패널과 프로토콜을 맞춘다.
+ * @param {object} message
+ * @param {Function} sendResponse
+ */
 async function handleAiCodeReviewRequest(message, sendResponse) {
   try {
     const settings = await getAiSettings();
@@ -493,11 +585,13 @@ async function handleAiCodeReviewRequest(message, sendResponse) {
       return;
     }
     if (!message || typeof message.code !== 'string' || !message.code.trim()) {
+      // 코드가 비어 있으면 리뷰 결과가 의미 없으므로 거부한다.
       sendResponse({ ok: false, reason: '검토할 코드가 제공되지 않았습니다.' });
       return;
     }
     const requestBody = buildAiCodeReviewRequestBody(message, settings);
     if (!requestBody.code) {
+      // sanitize 과정에서 코드가 비어 버린 경우를 한 번 더 검증한다.
       sendResponse({ ok: false, reason: '검토할 코드가 비어 있습니다.' });
       return;
     }
@@ -506,6 +600,7 @@ async function handleAiCodeReviewRequest(message, sendResponse) {
       Accept: 'application/json'
     };
     if (settings.apiKey) {
+      // API 키가 설정된 경우 header 두 곳에 모두 반영한다.
       headers.Authorization = `Bearer ${settings.apiKey}`;
       headers['x-api-key'] = settings.apiKey;
     }
@@ -523,6 +618,7 @@ async function handleAiCodeReviewRequest(message, sendResponse) {
       if (timer) clearTimeout(timer);
     }
     if (!response.ok) {
+      // 실패 응답은 가능한 한 원인 메시지를 사용자에게 명확히 전달한다.
       let errorMessage = `AI API 호출 실패 (HTTP ${response.status})`;
       try {
         const errorText = await response.text();
@@ -583,7 +679,9 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  // 우리 확장이 주입해 둔 탭만 다시 주입을 시도한다.
   if (!injectedTabs.has(tabId)) return;
+  // 로딩 상태로 전환될 때만 content.js를 다시 넣는다.
   if (changeInfo.status !== 'loading') return;
   chrome.scripting.executeScript(
     {
@@ -594,6 +692,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       if (chrome.runtime.lastError) {
         const message = chrome.runtime.lastError.message || '';
         if (message.includes('Cannot access contents of url')) {
+          // 리디렉션 등으로 접근 불가하면 추적 목록에서 제거한다.
           injectedTabs.delete(tabId);
         }
       }
@@ -603,6 +702,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === 'GET_EVENTS') {
+    // 저장된 이벤트 목록을 그대로 반환.
     chrome.storage.local.get({ events: [] }, (res) => sendResponse({ events: res.events || [] }));
     return true;
   }
@@ -610,6 +710,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === 'SAVE_EVENT') {
     chrome.storage.local.get({ events: [] }, (res) => {
       const events = res.events || [];
+      // 새 이벤트를 배열 끝에 추가하고 다시 저장.
       events.push(msg.event);
       chrome.storage.local.set({ events }, () => sendResponse({ ok: true }));
     });
@@ -619,6 +720,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === 'ENSURE_CONTENT_SCRIPT') {
     const tabId = msg.tabId;
     if (typeof tabId !== 'number') {
+      // 숫자 탭 ID가 아니라면 잘못된 요청으로 처리.
       sendResponse({ ok: false, reason: 'invalid_tab' });
       return false;
     }
@@ -629,9 +731,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       },
       () => {
         if (chrome.runtime.lastError) {
+          // 주입 오류 메시지를 그대로 돌려준다.
           sendResponse({ ok: false, reason: chrome.runtime.lastError.message });
           return;
         }
+        // 성공적으로 주입한 탭을 추적 목록에 추가.
         injectedTabs.add(tabId);
         sendResponse({ ok: true });
       }

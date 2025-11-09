@@ -1,11 +1,23 @@
+/**
+ * 페이지 상단에 표시되는 오버레이 및 하이라이트 UI를 관리한다.
+ * - 녹화 제어 버튼
+ * - 요소 하이라이트 및 셀렉터 팝오버
+ * - 위치/상태 복원 및 Chrome 메시지 연동
+ */
 import { getSelectorCandidates, getIframeContext } from '../selectors/index.js';
 import { elementSelectionState, overlayControlsState, recorderState } from '../state.js';
 import { buildDomContextSnapshot } from '../utils/dom.js';
 
+/**
+ * 현재 오버레이 위치를 저장해 새로고침 후에도 동일 위치를 유지한다.
+ */
 function saveOverlayPosition(left, top) {
   chrome.storage.local.set({ overlayPosition: { left, top } });
 }
 
+/**
+ * 오버레이 상태 텍스트를 갱신하고 톤(색상)을 적용한다.
+ */
 export function setOverlayStatus(message, tone = 'info') {
   if (!overlayControlsState.status) return;
   overlayControlsState.status.textContent = message || '';
@@ -13,6 +25,9 @@ export function setOverlayStatus(message, tone = 'info') {
   overlayControlsState.status.style.display = message ? 'block' : 'none';
 }
 
+/**
+ * 녹화 버튼 활성화 상태 및 선택 플래그를 UI에 반영한다.
+ */
 export function updateOverlayControlsState() {
   if (!overlayControlsState.buttons.start || !overlayControlsState.container) return;
   overlayControlsState.buttons.start.disabled = !!recorderState.isRecording;
@@ -20,6 +35,9 @@ export function updateOverlayControlsState() {
   overlayControlsState.container.toggleAttribute('data-selecting', !!elementSelectionState.mode);
 }
 
+/**
+ * 드래그 중 마우스 이동 이벤트로 컨트롤 패널 위치를 업데이트한다.
+ */
 function onOverlayDragMove(event) {
   if (!overlayControlsState.dragging || !overlayControlsState.container) return;
   const container = overlayControlsState.container;
@@ -36,6 +54,9 @@ function onOverlayDragMove(event) {
   container.style.bottom = '';
 }
 
+/**
+ * 드래그를 종료하고 위치를 저장한다.
+ */
 function stopOverlayDrag() {
   if (!overlayControlsState.dragging || !overlayControlsState.container) return;
   overlayControlsState.dragging = false;
@@ -45,6 +66,9 @@ function stopOverlayDrag() {
   saveOverlayPosition(rect.left, rect.top);
 }
 
+/**
+ * 사용자가 헤더를 누르면 드래그 상태를 시작한다.
+ */
 function startOverlayDrag(event) {
   if (!overlayControlsState.container) return;
   const rect = overlayControlsState.container.getBoundingClientRect();
@@ -60,6 +84,9 @@ function startOverlayDrag(event) {
   event.preventDefault();
 }
 
+/**
+ * 오버레이 명령에 대한 응답을 UI 메시지로 변환한다.
+ */
 function handleOverlayCommandResponse(command, response) {
   if (!response || response.ok) {
     if (command === 'start_record') {
@@ -89,6 +116,9 @@ function handleOverlayCommandResponse(command, response) {
   setOverlayStatus(message, 'error');
 }
 
+/**
+ * DevTools 패널로 명령을 전송하고 응답 처리.
+ */
 export function sendOverlayCommand(command, options = {}) {
   chrome.runtime.sendMessage({ type: 'OVERLAY_COMMAND', command, options }, (response) => {
     if (chrome.runtime.lastError) {
@@ -99,6 +129,9 @@ export function sendOverlayCommand(command, options = {}) {
   });
 }
 
+/**
+ * 저장된 위치가 있다면 오버레이를 그 좌표로 이동시킨다.
+ */
 function restoreOverlayPosition(container) {
   chrome.storage.local.get({ overlayPosition: null }, (data) => {
     const pos = data.overlayPosition;
@@ -111,6 +144,9 @@ function restoreOverlayPosition(container) {
   });
 }
 
+/**
+ * DevTools 패널과 동일한 UI 컨트롤을 페이지에 생성한다.
+ */
 export function createOverlayControls() {
   if (overlayControlsState.container) return;
   if (window !== window.top) return;
@@ -221,6 +257,7 @@ export function createOverlayControls() {
   handle.addEventListener('mousedown', startOverlayDrag, true);
 
   const observer = new MutationObserver(() => {
+    // button disable 상태 등 속성 변경시 최신 상태를 반영.
     updateOverlayControlsState();
   });
   observer.observe(container, { attributes: true });
@@ -243,6 +280,9 @@ export function isOverlayVisible() {
   return !!overlayControlsState.visible;
 }
 
+/**
+ * 오버레이 표시 여부를 토글하고 필요 시 상태를 저장/통지한다.
+ */
 export function setOverlayVisibility(visible, options = {}) {
   if (window !== window.top) return false;
   if (!overlayControlsState.container) {
@@ -269,16 +309,21 @@ export function setOverlayVisibility(visible, options = {}) {
   }
 
   if (changed && options.notify !== false) {
+    // DevTools 패널과 동기화를 위해 변경 사실을 알린다.
     chrome.runtime.sendMessage({ type: 'OVERLAY_VISIBILITY_CHANGED', visible: target });
   }
 
   return changed;
 }
 
+/**
+ * 하이라이트 팝오버에 표시할 HTML 문자열을 생성한다.
+ */
 function buildOverlayHtml(topSelector, selectors) {
   if (!topSelector) {
     return '<div style="color: #ff9800;">No selector found</div>';
   }
+  // 첫 번째 후보 외의 셀렉터가 있다면 개수를 알려준다.
   const more = selectors.length > 1 ? `<div style="font-size: 10px; color: #888; margin-top: 4px;">+${selectors.length - 1} more</div>` : '';
   return `
     <div style="font-weight: bold; margin-bottom: 4px; color: #4CAF50;">${topSelector.selector}</div>
@@ -313,12 +358,16 @@ function updateOverlayPosition(rect) {
   }
 }
 
+/**
+ * 선택된 요소의 위치 근처에 셀렉터 정보 풍선을 생성한다.
+ */
 function createSelectorOverlay(rect, selectors) {
   if (recorderState.overlayElement) {
     recorderState.overlayElement.remove();
     recorderState.overlayElement = null;
   }
 
+  // 새 팝오버를 생성해 선택된 요소의 셀렉터 정보를 표시한다.
   const overlay = document.createElement('div');
   overlay.id = '__ai_test_recorder_overlay__';
   overlay.style.cssText = `
@@ -343,6 +392,9 @@ function createSelectorOverlay(rect, selectors) {
   updateOverlayPosition(rect);
 }
 
+/**
+ * 현재 하이라이트와 팝오버를 모두 제거한다.
+ */
 export function removeHighlight() {
   if (recorderState.currentHighlightedElement) {
     recorderState.currentHighlightedElement.style.outline = '';
@@ -355,6 +407,9 @@ export function removeHighlight() {
   }
 }
 
+/**
+ * 부모 요소 강조(점선)를 적용해 현재 선택 컨텍스트를 보여준다.
+ */
 export function applySelectionParentHighlight(element) {
   if (!element || element.nodeType !== 1) return;
   if (elementSelectionState.highlightInfo && elementSelectionState.highlightInfo.element !== element) {
@@ -407,6 +462,9 @@ export function flashSelectionElement(element, duration = 1500) {
   }, duration);
 }
 
+/**
+ * 지정한 요소를 굵은 테두리와 팝오버로 강조 표시한다.
+ */
 export function highlightElement(element) {
   if (!element) return;
   const isSameElement = element === recorderState.currentHighlightedElement;
@@ -425,6 +483,7 @@ export function highlightElement(element) {
   createSelectorOverlay(rect, selectors);
 
   if (!isSameElement) {
+    // DevTools 패널에 hover된 요소 정보를 전송해 UI를 동기화한다.
     chrome.runtime.sendMessage({
       type: 'ELEMENT_HOVERED',
       selectors,
@@ -438,6 +497,9 @@ export function highlightElement(element) {
   }
 }
 
+/**
+ * 녹화 중 마우스가 요소 위에 올라가면 해당 요소를 하이라이트한다.
+ */
 function handleMouseOver(event) {
   if (!recorderState.isRecording) return;
   if (recorderState.mouseoutTimeout) {
@@ -462,6 +524,9 @@ function handleMouseOver(event) {
   }
 }
 
+/**
+ * 녹화 중 마우스가 요소 밖으로 나갔을 때 하이라이트를 제거한다.
+ */
 function handleMouseOut(event) {
   if (!recorderState.isRecording) return;
   const relatedTarget = event.relatedTarget;
@@ -478,6 +543,7 @@ function handleMouseOut(event) {
   recorderState.mouseoutTimeout = setTimeout(() => {
     const activeElement = document.elementFromPoint(event.clientX, event.clientY);
     if (!activeElement || activeElement === document.body || activeElement === document.documentElement || (activeElement.id !== '__ai_test_recorder_overlay__' && !activeElement.closest('#__ai_test_recorder_overlay__'))) {
+      // 마우스가 완전히 벗어난 경우에만 하이라이트 제거.
       if (activeElement !== recorderState.currentHighlightedElement && activeElement !== document.body && activeElement !== document.documentElement) {
         removeHighlight();
       }
@@ -486,6 +552,9 @@ function handleMouseOut(event) {
   }, 200);
 }
 
+/**
+ * 스크롤 시 하이라이트 팝오버 위치를 일정 간격으로 갱신한다.
+ */
 function handleScroll() {
   if (!recorderState.isRecording || !recorderState.currentHighlightedElement || !recorderState.overlayElement) return;
   if (recorderState.scrollTimeout) {
@@ -513,6 +582,9 @@ export function ensureRecordingState(isRecording) {
   updateOverlayControlsState();
 }
 
+/**
+ * 디버깅/테스트 용도로 현재 오버레이 상태를 조회한다.
+ */
 export function getCurrentOverlayState() {
   return {
     overlayElement: recorderState.overlayElement,

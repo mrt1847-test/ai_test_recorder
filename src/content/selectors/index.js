@@ -1,3 +1,7 @@
+/**
+ * DOM 요소에서 다양한 유형의 셀렉터 후보를 추출하고 정렬한다.
+ * CSS/XPath/텍스트 기반 후보를 생성하고 유일성 검사를 수행한다.
+ */
 import {
   buildFullXPath,
   buildRelativeCssSelector,
@@ -64,8 +68,13 @@ const ATTRIBUTE_PRIORITY = [
   { attr: 'type', type: 'type', score: 68, reason: 'type 속성', allowPartial: false }
 ];
 
+/**
+ * 단일 요소에서 속성 기반 셀렉터 후보를 생성한다.
+ * 우선순위를 정의한 ATTRIBUTE_PRIORITY에 따라 처리한다.
+ */
 function buildAttributeSelectors(element) {
   const results = [];
+  // 미리 정의된 속성 목록을 순회하면서 후보를 만든다.
   for (const meta of ATTRIBUTE_PRIORITY) {
     const rawValue = element.getAttribute && element.getAttribute(meta.attr);
     if (!rawValue) continue;
@@ -89,6 +98,7 @@ function buildAttributeSelectors(element) {
     });
 
     if (meta.allowPartial) {
+      // 공백/쉼표 등을 기준으로 부분 매칭 셀렉터를 추가한다.
       const tokens = rawValue.split(/[\s,;]+/).filter((token) => token.length > 2);
       tokens.slice(0, 2).forEach((token, index) => {
         const escapedToken = escapeAttributeValue(token);
@@ -105,6 +115,9 @@ function buildAttributeSelectors(element) {
   return results;
 }
 
+/**
+ * 요소의 classList를 활용해 class 조합 기반 셀렉터를 만든다.
+ */
 function generateClassSelectors(element) {
   const classList = Array.from(element.classList || []).filter(Boolean);
   if (classList.length === 0) return [];
@@ -112,6 +125,7 @@ function generateClassSelectors(element) {
   const escaped = classList.map((cls) => cssEscapeIdent(cls));
   const combinations = new Set();
 
+  // class 조합을 백트래킹으로 생성한다.
   function backtrack(start, depth, current) {
     if (current.length > 0 && current.length <= CLASS_COMBINATION_LIMIT) {
       const key = current.join('.');
@@ -152,6 +166,9 @@ function generateClassSelectors(element) {
   return results;
 }
 
+/**
+ * 셀렉터 유형에 따라 우선순위 점수를 반환한다.
+ */
 function getSelectorTypeRank(candidate) {
   if (!candidate) return 0;
   const type = candidate.type || inferSelectorType(candidate.selector);
@@ -164,6 +181,10 @@ function getSelectorTypeRank(candidate) {
   return 50;
 }
 
+/**
+ * 후보 셀렉터 배열을 유일성/관계/타입 점수를 기준으로 정렬한다.
+ * 유일 후보 > relative 후보 > 타입 우선순위 > 점수 순으로 정렬한다.
+ */
 function sortCandidates(candidates) {
   return candidates
     .slice()
@@ -189,6 +210,7 @@ function buildClassCombinationLists(classes, options = {}) {
   } = options;
   const uniqueClasses = Array.from(new Set(classes)).filter(Boolean).slice(0, classLimit);
   const combos = [];
+  // class 조합 수를 제한하면서 모든 조합을 생성한다.
   function backtrack(start, current) {
     if (current.length > 0 && combos.length < maxResults) {
       combos.push([...current]);
@@ -204,9 +226,13 @@ function buildClassCombinationLists(classes, options = {}) {
   return combos;
 }
 
+/**
+ * 텍스트 기반 셀렉터가 유일하지 않을 때 상위 요소 정보를 결합한 XPath를 시도한다.
+ */
 function tryBuildAncestorTextXPath(element, textValue, matchMode) {
   if (!element || !textValue) return null;
   const normalized = normalizeText(textValue);
+  // 텍스트가 비어 있으면 더 이상 진행할 수 없다.
   if (!normalized) return null;
   const literal = escapeXPathLiteral(normalized);
   const textExpr = matchMode === 'contains'
@@ -214,9 +240,11 @@ function tryBuildAncestorTextXPath(element, textValue, matchMode) {
     : `normalize-space(.) = ${literal}`;
   const elementClassList = Array.from(element.classList || []).filter(Boolean);
   if (elementClassList.length) {
+    // 원본 요소의 클래스 목록을 활용해 XPath 후보를 만든다.
     for (const cls of elementClassList.slice(0, TEXT_PARENT_CLASS_LIMIT)) {
       const literalClass = escapeXPathLiteral(cls);
       const tagName = element.tagName ? element.tagName.toLowerCase() : '*';
+      // 클래스와 텍스트 조합으로 구성 가능한 XPath 후보를 나열한다.
       const candidates = [
         `//*[@class=${literalClass} and normalize-space(.) = ${literal}]`,
         `//*[@class=${literalClass} and contains(normalize-space(.), ${literal})]`,
@@ -227,6 +255,7 @@ function tryBuildAncestorTextXPath(element, textValue, matchMode) {
         const selector = `xpath=${xpathExpr}`;
         const parsed = parseSelectorForMatching(selector, 'xpath');
         const count = countMatchesForSelector(parsed, document, { matchMode });
+        // 한 번만 매칭되면 즉시 해당 셀렉터를 반환한다.
         if (count === 1) {
           const isTagVariant = xpathExpr.startsWith(`//${tagName}`);
           return {
@@ -244,6 +273,7 @@ function tryBuildAncestorTextXPath(element, textValue, matchMode) {
   while (current && depth < TEXT_PARENT_MAX_DEPTH) {
     depth += 1;
     if (current.nodeType !== 1) {
+      // 텍스트 노드 등은 건너뛴다.
       current = current.parentElement;
       continue;
     }
@@ -256,6 +286,7 @@ function tryBuildAncestorTextXPath(element, textValue, matchMode) {
         const classSelector = `xpath=${classXPath}`;
         const classParsed = parseSelectorForMatching(classSelector, 'xpath');
         const classCount = countMatchesForSelector(classParsed, document, { matchMode });
+        // 클래스 조합으로 유일해지면 바로 반환.
         if (classCount === 1) {
           return {
             selector: classSelector,
@@ -267,6 +298,7 @@ function tryBuildAncestorTextXPath(element, textValue, matchMode) {
         const tagClassSelector = `xpath=${tagClassXPath}`;
         const tagClassParsed = parseSelectorForMatching(tagClassSelector, 'xpath');
         const tagClassCount = countMatchesForSelector(tagClassParsed, document, { matchMode });
+        // 태그+클래스 조합도 유일해지면 반환.
         if (tagClassCount === 1) {
           return {
             selector: tagClassSelector,
@@ -280,6 +312,7 @@ function tryBuildAncestorTextXPath(element, textValue, matchMode) {
       const tagOnlySelector = `xpath=${tagOnlyXPath}`;
       const tagOnlyParsed = parseSelectorForMatching(tagOnlySelector, 'xpath');
       const tagOnlyCount = countMatchesForSelector(tagOnlyParsed, document, { matchMode });
+      // 태그만으로 유일해지는 경우도 고려한다.
       if (tagOnlyCount === 1) {
         return {
           selector: tagOnlySelector,
@@ -293,11 +326,15 @@ function tryBuildAncestorTextXPath(element, textValue, matchMode) {
   return null;
 }
 
+/**
+ * 후보 객체에서 CSS 관련 셀렉터 문자열을 추출한다.
+ */
 function extractCssSelector(candidate) {
   if (!candidate) return null;
   const selector = candidate.selector || '';
   const type = candidate.type || inferSelectorType(selector);
   if (type === 'css') {
+    // css= 접두사가 있으면 제거한다.
     return selector.startsWith('css=') ? selector.slice(4) : selector;
   }
   if (type === 'class' || type === 'class-tag' || type === 'id' || type === 'tag') {
@@ -307,6 +344,9 @@ function extractCssSelector(candidate) {
   return null;
 }
 
+/**
+ * CSS 셀렉터가 중복될 때 상위 요소 경로를 확장하여 유일한 셀렉터를 찾는다.
+ */
 function tryBuildAncestorCssSelector(element, baseSelector, contextElement) {
   if (!element || !baseSelector) return null;
   const base = baseSelector.startsWith('css=') ? baseSelector.slice(4).trim() : baseSelector.trim();
@@ -319,11 +359,13 @@ function tryBuildAncestorCssSelector(element, baseSelector, contextElement) {
   while (current && depth < CSS_PARENT_MAX_DEPTH && paths.length) {
     depth += 1;
     if (current.nodeType !== 1) {
+      // 요소 노드가 아니면 상위로 계속 올라간다.
       current = current.parentElement;
       continue;
     }
     const ancestorSelectors = [];
     if (current.id) {
+      // 고유 id가 있으면 최우선으로 고려.
       ancestorSelectors.push(`#${cssEscapeIdent(current.id)}`);
     }
     const classList = Array.from(current.classList || []).filter(Boolean);
@@ -343,6 +385,7 @@ function tryBuildAncestorCssSelector(element, baseSelector, contextElement) {
       });
     }
     const tagName = current.tagName ? current.tagName.toLowerCase() : '*';
+    // 태그 이름만으로도 후보를 추가한다.
     ancestorSelectors.push(tagName);
 
     const newPaths = [];
@@ -359,6 +402,7 @@ function tryBuildAncestorCssSelector(element, baseSelector, contextElement) {
           const parsed = parseSelectorForMatching(`css=${fullSelector}`, 'css');
           const targetScope = contextElement || document;
           const count = countMatchesForSelector(parsed, targetScope);
+          // 유일하게 매칭되면 즉시 반환.
           if (count === 1) {
             return {
               selector: `css=${fullSelector}`,
@@ -375,6 +419,9 @@ function tryBuildAncestorCssSelector(element, baseSelector, contextElement) {
   return null;
 }
 
+/**
+ * 간단한 부모 체인만 따라가며 CSS 셀렉터에 부모 경로를 추가한다.
+ */
 function tryBuildSimpleAncestorCss(element, baseSelector, contextElement) {
   if (!element || !baseSelector) return null;
   const base = baseSelector.startsWith('css=') ? baseSelector.slice(4).trim() : baseSelector.trim();
@@ -401,12 +448,15 @@ function tryBuildSimpleAncestorCss(element, baseSelector, contextElement) {
     const fullSelector = contextElement ? `css=${scopedPrefix}${selector}` : `css=${selector}`;
     const parsed = parseSelectorForMatching(fullSelector, 'css');
     const count = countMatchesForSelector(parsed, targetScope);
+    // 현재까지의 조합이 유일해졌으면 즉시 반환.
     if (count === 1) {
       return { selector: fullSelector, count };
     }
     const parent = current.parentElement;
+    // 부모 요소가 더 이상 없으면 종료.
     if (!parent) break;
     const parentSelector = buildParentSelector(parent);
+    // 부모에 사용할 식별자가 없으면 더 이상 확장할 수 없다.
     if (!parentSelector) break;
     selector = `${parentSelector} > ${selector}`;
     current = parent;
@@ -416,12 +466,16 @@ function tryBuildSimpleAncestorCss(element, baseSelector, contextElement) {
   const finalSelector = contextElement ? `css=${scopedPrefix}${selector}` : `css=${selector}`;
   const finalParsed = parseSelectorForMatching(finalSelector, 'css');
   const finalCount = countMatchesForSelector(finalParsed, targetScope);
+  // 마지막 조합이 유일해졌는지 검사한다.
   if (finalCount === 1) {
     return { selector: finalSelector, count: finalCount };
   }
   return null;
 }
 
+/**
+ * 첫 번째 nth-of-type 요소에 대한 CSS 셀렉터 후보를 생성한다.
+ */
 function buildFirstNthOfTypeSelector(element) {
   if (!element || element.nodeType !== 1) return null;
   const parent = element.parentElement;
@@ -433,6 +487,7 @@ function buildFirstNthOfTypeSelector(element) {
   for (const sibling of siblings) {
     if (!sibling || sibling.nodeType !== 1) continue;
     if (!sibling.tagName) continue;
+    // 동일 태그인 형제 요소를 카운트해 첫 번째인지 확인.
     if (sibling.tagName.toLowerCase() === tagName) {
       nth += 1;
       if (sibling === element) break;
@@ -466,6 +521,9 @@ function buildFirstNthOfTypeSelector(element) {
   return null;
 }
 
+/**
+ * 대상 요소가 iframe 내부에 있는 경우 iframe 정보를 반환한다.
+ */
 export function getIframeContext(target) {
   try {
     const win = target && target.ownerDocument && target.ownerDocument.defaultView;
@@ -482,6 +540,9 @@ export function getIframeContext(target) {
   }
 }
 
+/**
+ * 후보 셀렉터의 유일성 검사를 수행하고 필요한 경우 보정한다.
+ */
 function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
   if (!baseCandidate || !baseCandidate.selector) return null;
   const candidate = { ...baseCandidate };
@@ -497,9 +558,11 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
       ? options.maxMatchSample
       : 4
   };
+    // 문서 전체를 대상으로 매칭 횟수를 계산한다.
     const globalCount = countMatchesForSelector(parsed, document, matchOptions);
     candidate.matchCount = globalCount;
     candidate.unique = globalCount === 1;
+    // 유일하지 않은데 허용되지 않으면 후보를 버린다.
     if (globalCount === 0 && options.allowZero !== true) {
       return null;
     }
@@ -512,6 +575,7 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
   }
 
   if (options.contextElement) {
+    // 특정 컨텍스트 내에서의 매칭 개수를 별도로 계산한다.
     const contextCount = countMatchesForSelector(parsed, options.contextElement, { matchMode: candidate.matchMode });
     candidate.contextMatchCount = contextCount;
     candidate.uniqueInContext = contextCount === 1;
@@ -528,6 +592,7 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
       return null;
     }
     if (options.skipGlobalCheck) {
+      // 전역 체크를 생략한 경우 컨텍스트 결과를 그대로 사용한다.
       candidate.matchCount = contextCount;
       candidate.unique = candidate.uniqueInContext;
     }
@@ -633,6 +698,9 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
   return applyFragilityAdjustments(candidate);
 }
 
+/**
+ * 중복 후보를 제거하면서 후보 목록을 축적하는 간단한 레지스트리를 만든다.
+ */
 function createCandidateRegistry() {
   const results = [];
   const seen = new Set();
@@ -651,6 +719,9 @@ function createCandidateRegistry() {
   };
 }
 
+/**
+ * nth-of-type, 절대 XPath 등 취약 패턴을 감지해 점수를 페널티한다.
+ */
 function applyFragilityAdjustments(candidate) {
   if (!candidate || typeof candidate.score !== 'number') {
     return candidate;
@@ -661,9 +732,11 @@ function applyFragilityAdjustments(candidate) {
   const flags = [];
 
   if (inferredType === 'xpath-full' || /xpath=\/html/i.test(selector)) {
+    // 절대 XPath는 쉽게 깨지므로 큰 페널티를 부여.
     penalty += 18;
     flags.push('절대 XPath');
   } else if ((inferredType === 'xpath' || inferredType === 'xpath-full') && /\/\d+\]/.test(selector) && !/@/.test(selector)) {
+    // 구조 의존 XPath(인덱스 기반)는 중간 페널티.
     penalty += 8;
     flags.push('구조 의존 XPath');
   }
@@ -671,6 +744,7 @@ function applyFragilityAdjustments(candidate) {
   if ((inferredType === 'css' || inferredType === 'class' || inferredType === 'class-tag' || inferredType === 'id') && /:nth-(child|of-type)\(/i.test(selector)) {
     const match = selector.match(/:nth-(?:child|of-type)\((\d+)\)/i);
     const nthValue = match ? parseInt(match[1], 10) : null;
+    // nth-of-type 사용 시 위치 의존성이 있으므로 페널티.
     penalty += nthValue === 1 ? 2 : 6;
     flags.push('nth-of-type 사용');
   }
@@ -678,6 +752,7 @@ function applyFragilityAdjustments(candidate) {
   if (inferredType === 'class' || inferredType === 'class-tag') {
     const classCount = (selector.match(/\./g) || []).length;
     if (classCount > 2) {
+      // 클래스가 너무 많으면 유지보수가 어렵기에 페널티.
       penalty += (classCount - 2) * 4;
       flags.push('과도한 class 조합');
     }
@@ -693,6 +768,9 @@ function applyFragilityAdjustments(candidate) {
   return candidate;
 }
 
+/**
+ * 후보를 유일성 검증 후 레지스트리에 추가한다.
+ */
 function addCandidate(registry, candidate, options = {}) {
   const enriched = enrichCandidateWithUniqueness(candidate, options);
   if (enriched) {
@@ -700,11 +778,15 @@ function addCandidate(registry, candidate, options = {}) {
   }
 }
 
+/**
+ * 단일 요소에서 사용할 만한 모든 셀렉터 후보를 수집한다.
+ */
 export function getSelectorCandidates(element) {
   if (!element) return [];
   const registry = createCandidateRegistry();
 
   try {
+    // 우선 속성 기반 후보를 추가.
     buildAttributeSelectors(element).forEach((cand) => {
       addCandidate(registry, cand, { duplicateScore: 62, element, maxMatchSample: 5 });
     });
@@ -712,6 +794,7 @@ export function getSelectorCandidates(element) {
     // ignore attribute access errors
   }
 
+  // class 조합 기반 후보.
   generateClassSelectors(element).forEach((cand) => {
     addCandidate(registry, cand, { duplicateScore: 58, element, maxMatchSample: 5 });
   });
@@ -761,6 +844,9 @@ export function getSelectorCandidates(element) {
   return sortCandidates(registry.list());
 }
 
+/**
+ * 부모/자식 관계를 고려한 상대 셀렉터 후보를 생성한다.
+ */
 export function getChildSelectorCandidates(parent, child) {
   if (!parent || !child) return [];
   const registry = createCandidateRegistry();
@@ -783,6 +869,7 @@ export function getChildSelectorCandidates(parent, child) {
     );
   }
 
+  // 자식 요소 자체의 후보도 함께 포함해 비교할 수 있게 한다.
   (getSelectorCandidates(child) || []).forEach((cand) => {
     registry.add({ ...cand, relation: cand.relation || 'global' });
   });
@@ -790,12 +877,16 @@ export function getChildSelectorCandidates(parent, child) {
   return sortCandidates(registry.list());
 }
 
+/**
+ * 현재 요소에서 부모 요소를 가리킬 수 있는 상대 셀렉터 후보를 생성한다.
+ */
 export function getParentSelectorCandidates(child, parent) {
   if (!child || !parent) return [];
   const registry = createCandidateRegistry();
 
   let current = parent;
   let depth = 1;
+  // 부모 체인을 따라 올라가면서 ../ 경로를 생성.
   while (current && current.nodeType === 1) {
     const steps = Array(depth).fill('..').join('/');
     addCandidate(
@@ -811,12 +902,14 @@ export function getParentSelectorCandidates(child, parent) {
       { skipGlobalCheck: true, contextElement: child, contextLabel: '현재 요소', duplicateScore: Math.max(58, 68 - (depth - 1) * 5), element: current }
     );
     if (!current.parentElement || current === document.documentElement) {
+      // 더 이상 상위 요소가 없으면 반복을 종료.
       break;
     }
     current = current.parentElement;
     depth += 1;
   }
 
+  // 부모 요소 자체의 전역 후보도 함께 추가한다.
   (getSelectorCandidates(parent) || []).forEach((cand) => {
     registry.add({ ...cand, relation: cand.relation || 'global' });
   });
@@ -824,6 +917,9 @@ export function getParentSelectorCandidates(child, parent) {
   return sortCandidates(registry.list());
 }
 
+/**
+ * 이벤트 레코드에서 셀렉터 정보를 추출해 배열 형태로 만든다.
+ */
 export function collectSelectorInfos(eventRecord) {
   const infos = [];
   const seen = new Set();
@@ -857,6 +953,7 @@ export function collectSelectorInfos(eventRecord) {
       .sort((a, b) => (b.score || 0) - (a.score || 0))
       .forEach((candidate) => {
         if (!candidate || !candidate.selector) return;
+        // 후보 셀렉터는 점수 순으로 정렬해 우선순위를 유지한다.
         pushInfo(candidate.selector, candidate.type || inferSelectorType(candidate.selector), {
           score: candidate.score || 0,
           textValue: candidate.textValue || null,

@@ -1,7 +1,17 @@
+/**
+ * 셀렉터 생성/검증에 필요한 DOM 관련 유틸리티 모음.
+ * CSS/XPath 문자열 처리, 텍스트 정규화, 매칭 카운팅 등을 제공한다.
+ */
+/**
+ * 속성 값에서 따옴표/제어문자를 이스케이프해 안전한 문자열을 만든다.
+ */
 export function escapeAttributeValue(value) {
   return (value || '').replace(/"/g, '\\"').replace(/\u0008/g, '').replace(/\u000c/g, '').trim();
 }
 
+/**
+ * CSS selector에서 사용할 식별자를 이스케이프한다.
+ */
 export function cssEscapeIdent(value) {
   if (typeof value !== 'string') return '';
   if (window.CSS && typeof window.CSS.escape === 'function') {
@@ -10,6 +20,9 @@ export function cssEscapeIdent(value) {
   return value.replace(/([!"#$%&'()*+,./:;<=>?@\[\]^`{|}~])/g, '\\$1');
 }
 
+/**
+ * 문서 루트 기준으로 요소에 대한 Full XPath를 생성한다.
+ */
 export function buildFullXPath(el) {
   if (!el || el.nodeType !== 1) return null;
   if (el.id) {
@@ -42,6 +55,7 @@ export function buildCssSegment(el) {
   const tag = el.tagName.toLowerCase();
   let index = 1;
   let sibling = el.previousElementSibling;
+  // 이전 형제 중 같은 태그가 몇 번째인지 계산한다.
   while (sibling) {
     if (sibling.nodeType === 1 && sibling.tagName === el.tagName) {
       index += 1;
@@ -58,6 +72,7 @@ export function buildCssSegment(el) {
     const parent = el.parentElement;
     if (parent) {
       const requiredClasses = rawClassList.slice(0, classList.length);
+      // 동일한 클래스 조합을 가진 형제 요소가 몇 개인지 확인한다.
       const matchingSiblings = Array.from(parent.children || []).filter((child) => {
         if (!child || child.nodeType !== 1) return false;
         if (child.tagName !== el.tagName) return false;
@@ -78,6 +93,7 @@ export function buildRelativeCssSelector(parent, child) {
   const segments = [];
   let current = child;
   while (current && current !== parent) {
+    // 텍스트 노드 등은 건너뛴다.
     if (current.nodeType !== 1) {
       current = current.parentElement;
       continue;
@@ -104,6 +120,7 @@ export function buildUniqueCssPath(element, contextElement) {
     const parsed = parseSelectorForMatching(`css=${selectorString}`, 'css');
     const targetScope = contextElement || document;
     const matchCount = countMatchesForSelector(parsed, targetScope);
+    // 현재까지 조합한 경로가 유일해졌으면 반환한다.
     if (matchCount === 1) {
       if (!contextElement && cssPath.startsWith('html:nth-of-type(1) > ')) {
         return cssPath.replace(/^html:nth-of-type\(1\)\s*>\s*/, '');
@@ -151,6 +168,7 @@ export function buildXPathSegment(el) {
     return `${tag}[${containsExpr}]`;
   }
   const attrPriority = ['data-testid', 'data-test', 'data-qa', 'data-cy', 'data-id', 'aria-label', 'role', 'name', 'type'];
+  // 우선순위 속성들 중 하나라도 있으면 바로 사용한다.
   for (const attr of attrPriority) {
     const val = el.getAttribute && el.getAttribute(attr);
     if (val) {
@@ -177,6 +195,7 @@ export function buildRelativeXPathSelector(parent, child) {
   const segments = [];
   let current = child;
   while (current && current !== parent) {
+    // 요소 노드가 아니면 상위로 이동한다.
     if (current.nodeType !== 1) {
       current = current.parentElement;
       continue;
@@ -194,6 +213,7 @@ export function buildRobustXPathSegment(el) {
   if (!el || el.nodeType !== 1) return null;
   const tag = el.tagName.toLowerCase();
   if (el.id) {
+    // id가 있으면 더 이상 상위 요소를 탐색할 필요 없으니 stop 플래그를 준다.
     return { segment: `//*[@id=${escapeXPathLiteral(el.id)}]`, stop: true };
   }
   const attrPriority = ['data-testid', 'data-test', 'data-qa', 'data-cy', 'data-id', 'aria-label', 'role', 'name', 'type'];
@@ -225,9 +245,11 @@ export function buildRobustXPath(el) {
   const segments = [];
   let current = el;
   while (current && current.nodeType === 1) {
+    // 각 단계별로 속성 기반 XPath 조각을 생성한다.
     const info = buildRobustXPathSegment(current);
     if (!info || !info.segment) return null;
     segments.unshift(info.segment);
+    // stop 플래그가 true인 경우 루프를 종료한다.
     if (info.stop) break;
     current = current.parentElement;
   }
@@ -281,10 +303,12 @@ export function parseSelectorForMatching(selector, explicitType) {
 export function iterateElements(scope, callback) {
   if (!scope || typeof callback !== 'function') return;
   if (scope === document) {
+    // 전체 문서일 때는 querySelectorAll('*')로 순회.
     document.querySelectorAll('*').forEach(callback);
     return;
   }
   if (scope.nodeType === 1) {
+    // 단일 요소 범위는 자신과 자손을 순회.
     callback(scope);
     scope.querySelectorAll('*').forEach(callback);
   }
@@ -311,6 +335,7 @@ export function countMatchesForSelector(parsed, root, options = {}) {
       const iterator = doc.evaluate(parsed.value, contextNode, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
       let count = 0;
       let node = iterator.iterateNext();
+      // XPath 결과를 하나씩 순회하면서 개수를 센다.
       while (node) {
         count += 1;
         if (shouldClamp && count >= maxCount) {
@@ -331,6 +356,7 @@ export function countMatchesForSelector(parsed, root, options = {}) {
       const iterator = doc.evaluate(expression, contextNode, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
       let count = 0;
       let node = iterator.iterateNext();
+      // 텍스트 기반 XPath도 동일하게 반복하며 개수를 계산.
       while (node) {
         count += 1;
         if (shouldClamp && count >= maxCount) {
@@ -346,6 +372,7 @@ export function countMatchesForSelector(parsed, root, options = {}) {
         return result.length;
       }
       let count = result.length;
+      // 스코프 자체도 셀렉터와 일치하면 추가로 카운트.
       if (scope.matches && scope.matches(parsed.value)) {
         count += 1;
       }
@@ -405,6 +432,7 @@ function getElementPositionInfo(element) {
     total = children.length;
     index = children.indexOf(element);
     nthOfType = children
+      // 현재 요소와 같은 태그를 가진 형제만 세어 nth-of-type 정보를 만든다.
       .slice(0, index + 1)
       .filter((el) => el.tagName === element.tagName).length;
   } else {
@@ -457,6 +485,7 @@ export function buildDomContextSnapshot(element, options = {}) {
 
   const ancestors = [];
   let current = element.parentElement;
+  // 최대 maxAncestors개까지 상위 요소를 요약한다.
   while (current && ancestors.length < maxAncestors) {
     const summary = summarizeElementForContext(current);
     if (summary) {
@@ -467,6 +496,7 @@ export function buildDomContextSnapshot(element, options = {}) {
 
   const children = [];
   const childElements = Array.from(element.children || []);
+  // 최대 maxChildren개까지 자식 요소 요약을 작성한다.
   childElements.slice(0, maxChildren).forEach((child) => {
     const summary = summarizeElementForContext(child);
     if (summary) {
