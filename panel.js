@@ -747,6 +747,22 @@ function ensureContentScriptInjected(tabId) {
   });
 }
 
+function sendMessageWithInjection(tabId, message, callback) {
+  ensureContentScriptInjected(tabId)
+    .then(() => {
+      chrome.tabs.sendMessage(tabId, message, (response) => {
+        if (chrome.runtime.lastError) {
+          if (callback) callback(null, new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (callback) callback(response, null);
+      });
+    })
+    .catch((error) => {
+      if (callback) callback(null, error);
+    });
+}
+
 function withActiveTab(callback) {
   const deliverTab = (tab) => {
     if (!tab) {
@@ -809,7 +825,7 @@ function triggerStartRecording(options = {}, callback) {
     chrome.storage.local.set({ recordingStartUrl: startUrl });
 
     const beginRecording = () => {
-      recording = true;
+    recording = true;
       if (startBtn) startBtn.disabled = true;
       if (stopBtn) stopBtn.disabled = false;
       chrome.storage.local.set({events: [], recording: true});
@@ -819,15 +835,15 @@ function triggerStartRecording(options = {}, callback) {
       setCodeText('');
       logEntries.innerHTML = '';
       currentEventIndex = -1;
-      listenEvents();
+    listenEvents();
 
-      chrome.tabs.sendMessage(currentTab.id, {type: 'RECORDING_START'}, () => {
-        if (chrome.runtime.lastError) {
+      sendMessageWithInjection(currentTab.id, {type: 'RECORDING_START'}, (response, error) => {
+        if (error) {
           const tabId = currentTab.id;
           const onUpdated = (updatedTabId, changeInfo) => {
             if (updatedTabId === tabId && changeInfo.status === 'complete') {
               chrome.tabs.onUpdated.removeListener(onUpdated);
-              chrome.tabs.sendMessage(tabId, {type: 'RECORDING_START'});
+              sendMessageWithInjection(tabId, {type: 'RECORDING_START'});
             }
           };
           chrome.tabs.onUpdated.addListener(onUpdated);
@@ -859,7 +875,7 @@ function triggerStopRecording(options = {}, callback) {
   
   withActiveTab((tab) => {
     if (tab) {
-      chrome.tabs.sendMessage(tab.id, {type: 'RECORDING_STOP'}, () => {});
+      sendMessageWithInjection(tab.id, {type: 'RECORDING_STOP'});
     }
   });
 
@@ -965,7 +981,7 @@ stopBtn.addEventListener('click', ()=>{
 resetBtn.addEventListener('click', () => {
   // 전체 삭제
   chrome.storage.local.clear(() => {
-    recording = false;
+  recording = false;
     recordingStartUrl = '';
     allEvents = [];
     timeline.innerHTML = '';
@@ -976,7 +992,7 @@ resetBtn.addEventListener('click', () => {
     // 모든 탭에 녹화 중지 메시지 전송
     withActiveTab((tab) => {
       if (tab) {
-        chrome.tabs.sendMessage(tab.id, {type: 'RECORDING_STOP'}, () => {});
+        sendMessageWithInjection(tab.id, {type: 'RECORDING_STOP'});
       }
     });
     manualActions = [];
@@ -990,7 +1006,7 @@ resetBtn.addEventListener('click', () => {
 
 listenEvents();
 updateCode();
-loadTimeline();
+  loadTimeline();
 
 if (elementSelectBtn) {
   elementSelectBtn.addEventListener('click', () => {
@@ -1334,9 +1350,9 @@ function requestOverlayVisibility(targetVisible, options = {}) {
       applyOverlayVisibility(false, { persist: true });
       return;
     }
-    chrome.tabs.sendMessage(tab.id, { type: 'OVERLAY_VISIBILITY_SET', visible: desired }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.warn('오버레이 표시 상태를 변경할 수 없습니다:', chrome.runtime.lastError.message);
+    sendMessageWithInjection(tab.id, { type: 'OVERLAY_VISIBILITY_SET', visible: desired }, (response, error) => {
+      if (error) {
+        console.warn('오버레이 표시 상태를 변경할 수 없습니다:', error.message);
         if (options.revert !== false) {
           applyOverlayVisibility(false, { persist: false });
         }
@@ -1358,10 +1374,7 @@ function requestOverlayVisibility(targetVisible, options = {}) {
 function syncOverlayVisibility() {
   withActiveTab((tab) => {
     if (!tab) return;
-    chrome.tabs.sendMessage(tab.id, { type: 'OVERLAY_VISIBILITY_GET' }, (response) => {
-      if (chrome.runtime.lastError) {
-        return;
-      }
+    sendMessageWithInjection(tab.id, { type: 'OVERLAY_VISIBILITY_GET' }, (response) => {
       if (response && response.ok) {
         applyOverlayVisibility(!!response.visible, { persist: false });
       }
@@ -1701,18 +1714,21 @@ function renderSelectorGroup(candidates, options = {}) {
   candidates.forEach((candidate, listIndex) => {
     const candidateRef = listRef && listRef[listIndex] ? listRef[listIndex] : candidate;
     if (!candidateRef || !candidateRef.selector) return;
+    const selectorType = candidateRef.type || inferSelectorType(candidateRef.selector);
     const matchCount = typeof candidateRef.matchCount === 'number' ? candidateRef.matchCount : null;
     const contextMatchCount = typeof candidateRef.contextMatchCount === 'number' ? candidateRef.contextMatchCount : null;
     const effectiveCount = matchCount !== null ? matchCount : contextMatchCount;
-    if (effectiveCount !== null && effectiveCount !== 1) {
-      return;
-    }
-    if (candidateRef.unique === false) {
-      return;
+    const isTextSelector = selectorType === 'text';
+    if (!isTextSelector) {
+      if (effectiveCount !== null && effectiveCount !== 1) {
+        return;
+      }
+      if (candidateRef.unique === false) {
+        return;
+      }
     }
     const item = document.createElement('div');
     item.className = 'selector-item';
-    const selectorType = candidateRef.type || inferSelectorType(candidateRef.selector);
     const candidateMatchMode = candidateRef.matchMode || (selectorType === 'text' ? 'exact' : null);
     const primaryMatchMode = event && event.primarySelectorMatchMode
       ? event.primarySelectorMatchMode
@@ -2209,9 +2225,9 @@ function sendSelectionMessage(payload, callback) {
       if (callback) callback({ok: false, reason: 'no_active_tab'});
       return;
     }
-    chrome.tabs.sendMessage(tab.id, payload, (response) => {
-      if (chrome.runtime.lastError) {
-        if (callback) callback({ok: false, reason: chrome.runtime.lastError.message});
+    sendMessageWithInjection(tab.id, payload, (response, error) => {
+      if (error) {
+        if (callback) callback({ok: false, reason: error.message});
         return;
       }
       if (callback) callback(response || {ok: true});
@@ -2598,18 +2614,22 @@ function executeSelectionAction(actionType, path, options = {}, callback) {
       if (callback) callback({ok: false, reason: 'no_active_tab'});
       return;
     }
-    chrome.tabs.sendMessage(tab.id, {
-      type: 'ELEMENT_SELECTION_EXECUTE',
-      action: actionType,
-      path,
-      options
-    }, (resp) => {
-      if (chrome.runtime.lastError) {
-        if (callback) callback({ok: false, reason: chrome.runtime.lastError.message});
-        return;
+    sendMessageWithInjection(
+      tab.id,
+      {
+        type: 'ELEMENT_SELECTION_EXECUTE',
+        action: actionType,
+        path,
+        options
+      },
+      (resp, error) => {
+        if (error) {
+          if (callback) callback({ok: false, reason: error.message});
+          return;
+        }
+        if (callback) callback(resp || {ok: true});
       }
-      if (callback) callback(resp || {ok: true});
-    });
+    );
   });
 }
 
@@ -2974,29 +2994,33 @@ function sendReplayStep() {
     clearTimeout(replayState.navigationGuard);
     replayState.navigationGuard = null;
   }
-  chrome.tabs.sendMessage(replayState.tabId, {
-    type: 'REPLAY_EXECUTE_STEP',
-    event: currentEvent,
-    index: replayState.index,
-    total: replayState.events.length,
-    timeoutMs: 10000
-  }, (response) => {
-    if (chrome.runtime.lastError) {
-      // 컨텐츠 스크립트가 아직 준비되지 않음 (탭 이동/새로고침 등)
-      replayState.pending = false;
-      replayState.awaitingContent = true;
-      ensureContentScriptInjected(replayState.tabId).catch(() => {});
-      return;
+  sendMessageWithInjection(
+    replayState.tabId,
+    {
+      type: 'REPLAY_EXECUTE_STEP',
+      event: currentEvent,
+      index: replayState.index,
+      total: replayState.events.length,
+      timeoutMs: 10000
+    },
+    (response, error) => {
+      if (error) {
+        // 컨텐츠 스크립트가 아직 준비되지 않음 (탭 이동/새로고침 등)
+        replayState.pending = false;
+        replayState.awaitingContent = true;
+        ensureContentScriptInjected(replayState.tabId).catch(() => {});
+        return;
+      }
+      if (!response) {
+        // 응답이 없으면 결과 메시지를 기다림
+        return;
+      }
+      if (response.ok === false && response.reason) {
+        replayState.pending = false;
+        abortReplay(response.reason);
+      }
     }
-    if (!response) {
-      // 응답이 없으면 결과 메시지를 기다림
-      return;
-    }
-    if (response.ok === false && response.reason) {
-      replayState.pending = false;
-      abortReplay(response.reason);
-    }
-  });
+  );
 }
 
 function handleReplayStepResult(msg) {
@@ -3056,7 +3080,7 @@ function startReplay() {
     return;
   }
   chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
-    const events = res && res.events || [];
+  const events = res && res.events || [];
     chrome.storage.local.get({ manualActions: [], recordingStartUrl }, (data) => {
       const manualListRaw = Array.isArray(data.manualActions) ? data.manualActions : [];
       const manualList = manualListRaw.filter(Boolean);
@@ -3239,6 +3263,23 @@ function getTextValue(selectorInfo) {
   return '';
 }
 
+function extractAttributeValue(selector, attrName) {
+  if (!selector || !attrName) return '';
+  // [data-testid="value"] 형식에서 value 추출
+  const attrPattern = new RegExp(`\\[${attrName}\\s*=\\s*["']([^"']+)["']\\]`);
+  const match = selector.match(attrPattern);
+  if (match && match[1]) {
+    return match[1];
+  }
+  // [data-testid*="value"] 형식 (부분 일치)
+  const partialPattern = new RegExp(`\\[${attrName}\\s*\\*=\\s*["']([^"']+)["']\\]`);
+  const partialMatch = selector.match(partialPattern);
+  if (partialMatch && partialMatch[1]) {
+    return partialMatch[1];
+  }
+  return '';
+}
+
 function getXPathValue(selectorInfo) {
   if (!selectorInfo) return '';
   if (selectorInfo.xpathValue) return selectorInfo.xpathValue;
@@ -3321,7 +3362,9 @@ function buildSeleniumFrameSwitchTS(ctx) {
 function buildPlaywrightLocatorExpression(base, selection, languageLower) {
   const selectorType = selection.type || inferSelectorType(selection.selector);
   const pythonLike = languageLower === 'python' || languageLower === 'python-class';
+  
   if (pythonLike) {
+    // Python: text 타입
     if (selectorType === 'text') {
       const textVal = getTextValue(selection);
       if (textVal) {
@@ -3332,14 +3375,42 @@ function buildPlaywrightLocatorExpression(base, selection, languageLower) {
         return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=True)`;
       }
     }
-    if (selectorType === 'xpath') {
+    
+    // Python: xpath 타입
+    if (selectorType === 'xpath' || selectorType === 'xpath-full') {
       const locator = ensureXPathSelector(selection.selector);
       return `${base}.locator("${escapeForPythonString(locator)}")`;
     }
+    
+    // Python: data-testid 타입
+    if (selectorType === 'data-testid') {
+      const testIdValue = extractAttributeValue(selection.selector, 'data-testid');
+      if (testIdValue) {
+        return `${base}.get_by_test_id("${escapeForPythonString(testIdValue)}")`;
+      }
+    }
+    
+    // Python: aria-label 타입
+    if (selectorType === 'aria-label') {
+      const labelValue = extractAttributeValue(selection.selector, 'aria-label');
+      if (labelValue) {
+        return `${base}.get_by_label("${escapeForPythonString(labelValue)}")`;
+      }
+    }
+    
+    // Python: role 타입
+    if (selectorType === 'role') {
+      const roleValue = extractAttributeValue(selection.selector, 'role');
+      if (roleValue) {
+        return `${base}.get_by_role("${escapeForPythonString(roleValue)}")`;
+      }
+    }
+    
+    // Python: 기본 locator
     return `${base}.locator("${escapeForPythonString(selection.selector)}")`;
   }
 
-  // JavaScript / TypeScript
+  // JavaScript / TypeScript: text 타입
   if (selectorType === 'text') {
     const textVal = getTextValue(selection);
     if (textVal) {
@@ -3350,10 +3421,38 @@ function buildPlaywrightLocatorExpression(base, selection, languageLower) {
       return `${base}.getByText("${escapeForJSString(textVal)}", { exact: true })`;
     }
   }
-  if (selectorType === 'xpath') {
+  
+  // JavaScript / TypeScript: xpath 타입
+  if (selectorType === 'xpath' || selectorType === 'xpath-full') {
     const locator = ensureXPathSelector(selection.selector);
     return `${base}.locator("${escapeForJSString(locator)}")`;
   }
+  
+  // JavaScript / TypeScript: data-testid 타입
+  if (selectorType === 'data-testid') {
+    const testIdValue = extractAttributeValue(selection.selector, 'data-testid');
+    if (testIdValue) {
+      return `${base}.getByTestId("${escapeForJSString(testIdValue)}")`;
+    }
+  }
+  
+  // JavaScript / TypeScript: aria-label 타입
+  if (selectorType === 'aria-label') {
+    const labelValue = extractAttributeValue(selection.selector, 'aria-label');
+    if (labelValue) {
+      return `${base}.getByLabel("${escapeForJSString(labelValue)}")`;
+    }
+  }
+  
+  // JavaScript / TypeScript: role 타입
+  if (selectorType === 'role') {
+    const roleValue = extractAttributeValue(selection.selector, 'role');
+    if (roleValue) {
+      return `${base}.getByRole("${escapeForJSString(roleValue)}")`;
+    }
+  }
+  
+  // JavaScript / TypeScript: 기본 locator
   return `${base}.locator("${escapeForJSString(selection.selector)}")`;
 }
 
@@ -3380,84 +3479,116 @@ function buildSeleniumLocatorSpec(selection) {
   return {byPython: 'By.CSS_SELECTOR', byJS: 'By.css', value: cssValue};
 }
 
+function buildPlaywrightLocatorExpressionForAction(base, selectorInfo, pythonLike) {
+  const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
+  
+  if (pythonLike) {
+    // Python: text
+    if (selectorType === 'text') {
+      const textVal = getTextValue(selectorInfo);
+      if (textVal) {
+        const matchMode = selectorInfo.matchMode || 'exact';
+        if (matchMode === 'contains') {
+          return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=False)`;
+        }
+        return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=True)`;
+      }
+    }
+    // Python: xpath
+    if (selectorType === 'xpath' || selectorType === 'xpath-full') {
+      const locator = ensureXPathSelector(selectorInfo.selector);
+      return `${base}.locator("${escapeForPythonString(locator)}")`;
+    }
+    // Python: data-testid
+    if (selectorType === 'data-testid') {
+      const testIdValue = extractAttributeValue(selectorInfo.selector, 'data-testid');
+      if (testIdValue) {
+        return `${base}.get_by_test_id("${escapeForPythonString(testIdValue)}")`;
+      }
+    }
+    // Python: aria-label
+    if (selectorType === 'aria-label') {
+      const labelValue = extractAttributeValue(selectorInfo.selector, 'aria-label');
+      if (labelValue) {
+        return `${base}.get_by_label("${escapeForPythonString(labelValue)}")`;
+      }
+    }
+    // Python: role
+    if (selectorType === 'role') {
+      const roleValue = extractAttributeValue(selectorInfo.selector, 'role');
+      if (roleValue) {
+        return `${base}.get_by_role("${escapeForPythonString(roleValue)}")`;
+      }
+    }
+    // Python: 기본 locator
+    return `${base}.locator("${escapeForPythonString(selectorInfo.selector)}")`;
+  }
+  
+  // JavaScript/TypeScript: text
+  if (selectorType === 'text') {
+    const textVal = getTextValue(selectorInfo);
+    if (textVal) {
+      const matchMode = selectorInfo.matchMode || 'exact';
+      if (matchMode === 'contains') {
+        return `${base}.getByText("${escapeForJSString(textVal)}")`;
+      }
+      return `${base}.getByText("${escapeForJSString(textVal)}", { exact: true })`;
+    }
+  }
+  // JavaScript/TypeScript: xpath
+  if (selectorType === 'xpath' || selectorType === 'xpath-full') {
+    const locator = ensureXPathSelector(selectorInfo.selector);
+    return `${base}.locator("${escapeForJSString(locator)}")`;
+  }
+  // JavaScript/TypeScript: data-testid
+  if (selectorType === 'data-testid') {
+    const testIdValue = extractAttributeValue(selectorInfo.selector, 'data-testid');
+    if (testIdValue) {
+      return `${base}.getByTestId("${escapeForJSString(testIdValue)}")`;
+    }
+  }
+  // JavaScript/TypeScript: aria-label
+  if (selectorType === 'aria-label') {
+    const labelValue = extractAttributeValue(selectorInfo.selector, 'aria-label');
+    if (labelValue) {
+      return `${base}.getByLabel("${escapeForJSString(labelValue)}")`;
+    }
+  }
+  // JavaScript/TypeScript: role
+  if (selectorType === 'role') {
+    const roleValue = extractAttributeValue(selectorInfo.selector, 'role');
+    if (roleValue) {
+      return `${base}.getByRole("${escapeForJSString(roleValue)}")`;
+    }
+  }
+  // JavaScript/TypeScript: 기본 locator
+  return `${base}.locator("${escapeForJSString(selectorInfo.selector)}")`;
+}
+
 function buildPlaywrightPythonAction(ev, selectorInfo, base = 'page') {
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
-  const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
+  const locatorExpr = buildPlaywrightLocatorExpressionForAction(base, selectorInfo, true);
   const value = escapeForPythonString(ev.value || '');
+  
   if (ev.action === 'click') {
-    if (selectorType === 'text') {
-      const textVal = getTextValue(selectorInfo);
-      if (textVal) {
-        const matchMode = selectorInfo.matchMode || 'exact';
-        if (matchMode === 'contains') {
-          return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=False).click()`;
-        }
-        return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=True).click()`;
-      }
-    }
-    if (selectorType === 'xpath') {
-      const locator = ensureXPathSelector(selectorInfo.selector);
-      return `${base}.locator("${escapeForPythonString(locator)}").click()`;
-    }
-    return `${base}.click("${escapeForPythonString(selectorInfo.selector)}")`;
+    return `${locatorExpr}.click()`;
   }
   if (ev.action === 'input') {
-    if (selectorType === 'text') {
-      const textVal = getTextValue(selectorInfo);
-      if (textVal) {
-        const matchMode = selectorInfo.matchMode || 'exact';
-        if (matchMode === 'contains') {
-          return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=False).fill("${value}")`;
-        }
-        return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=True).fill("${value}")`;
-      }
-    }
-    if (selectorType === 'xpath') {
-      const locator = ensureXPathSelector(selectorInfo.selector);
-      return `${base}.locator("${escapeForPythonString(locator)}").fill("${value}")`;
-    }
-    return `${base}.fill("${escapeForPythonString(selectorInfo.selector)}", "${value}")`;
+    return `${locatorExpr}.fill("${value}")`;
   }
   return null;
 }
 
 function buildPlaywrightJSAction(ev, selectorInfo, base = 'page') {
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
-  const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
+  const locatorExpr = buildPlaywrightLocatorExpressionForAction(base, selectorInfo, false);
   const value = escapeForJSString(ev.value || '');
+  
   if (ev.action === 'click') {
-    if (selectorType === 'text') {
-      const textVal = getTextValue(selectorInfo);
-      if (textVal) {
-        const matchMode = selectorInfo.matchMode || 'exact';
-        if (matchMode === 'contains') {
-          return `await ${base}.getByText("${escapeForJSString(textVal)}").click();`;
-        }
-        return `await ${base}.getByText("${escapeForJSString(textVal)}", { exact: true }).click();`;
-      }
-    }
-    if (selectorType === 'xpath') {
-      const locator = ensureXPathSelector(selectorInfo.selector);
-      return `await ${base}.locator("${escapeForJSString(locator)}").click();`;
-    }
-    return `await ${base}.click("${escapeForJSString(selectorInfo.selector)}");`;
+    return `await ${locatorExpr}.click();`;
   }
   if (ev.action === 'input') {
-    if (selectorType === 'text') {
-      const textVal = getTextValue(selectorInfo);
-      if (textVal) {
-        const matchMode = selectorInfo.matchMode || 'exact';
-        if (matchMode === 'contains') {
-          return `await ${base}.getByText("${escapeForJSString(textVal)}").fill("${value}");`;
-        }
-        return `await ${base}.getByText("${escapeForJSString(textVal)}", { exact: true }).fill("${value}");`;
-      }
-    }
-    if (selectorType === 'xpath') {
-      const locator = ensureXPathSelector(selectorInfo.selector);
-      return `await ${base}.locator("${escapeForJSString(locator)}").fill("${value}");`;
-    }
-    return `await ${base}.fill("${escapeForJSString(selectorInfo.selector)}", "${value}");`;
+    return `await ${locatorExpr}.fill("${value}");`;
   }
   return null;
 }
@@ -3590,11 +3721,11 @@ function generateCode(events, manualList, framework, language) {
   
   if (frameworkLower === 'playwright') {
     if (languageLower === 'python') {
-      lines.push("from playwright.sync_api import sync_playwright");
+    lines.push("from playwright.sync_api import sync_playwright");
       lines.push("");
-      lines.push("with sync_playwright() as p:");
-      lines.push("  browser = p.chromium.launch(headless=False)");
-      lines.push("  page = browser.new_page()");
+    lines.push("with sync_playwright() as p:");
+    lines.push("  browser = p.chromium.launch(headless=False)");
+    lines.push("  page = browser.new_page()");
       let currentFrameContext = null;
       let frameLocatorIndex = 0;
       let currentBase = 'page';
@@ -3623,7 +3754,7 @@ function generateCode(events, manualList, framework, language) {
           emitManualActionLines(lines, entry.action, frameworkLower, languageLower, '  ');
         }
       });
-      lines.push("  browser.close()");
+    lines.push("  browser.close()");
     } else if (languageLower === 'python-class') {
       lines.push("from playwright.sync_api import sync_playwright");
       lines.push("");
@@ -3752,11 +3883,11 @@ function generateCode(events, manualList, framework, language) {
     }
   } else if (frameworkLower === 'selenium') {
     if (languageLower === 'python') {
-      lines.push("from selenium import webdriver");
+    lines.push("from selenium import webdriver");
       lines.push("from selenium.webdriver.common.by import By");
       lines.push("");
-      lines.push("driver = webdriver.Chrome()");
-      lines.push("driver.get('REPLACE_URL')");
+    lines.push("driver = webdriver.Chrome()");
+    lines.push("driver.get('REPLACE_URL')");
       let currentFrame = null;
       timeline.forEach((entry) => {
         if (entry.kind === 'event') {
@@ -3780,7 +3911,7 @@ function generateCode(events, manualList, framework, language) {
           emitManualActionLines(lines, entry.action, frameworkLower, languageLower, '');
         }
       });
-      lines.push("driver.quit()");
+    lines.push("driver.quit()");
     } else if (languageLower === 'python-class') {
       lines.push("from selenium import webdriver");
       lines.push("from selenium.webdriver.common.by import By");

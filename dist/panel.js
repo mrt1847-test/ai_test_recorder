@@ -1701,18 +1701,21 @@ function renderSelectorGroup(candidates, options = {}) {
   candidates.forEach((candidate, listIndex) => {
     const candidateRef = listRef && listRef[listIndex] ? listRef[listIndex] : candidate;
     if (!candidateRef || !candidateRef.selector) return;
+    const selectorType = candidateRef.type || inferSelectorType(candidateRef.selector);
     const matchCount = typeof candidateRef.matchCount === 'number' ? candidateRef.matchCount : null;
     const contextMatchCount = typeof candidateRef.contextMatchCount === 'number' ? candidateRef.contextMatchCount : null;
     const effectiveCount = matchCount !== null ? matchCount : contextMatchCount;
-    if (effectiveCount !== null && effectiveCount !== 1) {
-      return;
-    }
-    if (candidateRef.unique === false) {
-      return;
+    const isTextSelector = selectorType === 'text';
+    if (!isTextSelector) {
+      if (effectiveCount !== null && effectiveCount !== 1) {
+        return;
+      }
+      if (candidateRef.unique === false) {
+        return;
+      }
     }
     const item = document.createElement('div');
     item.className = 'selector-item';
-    const selectorType = candidateRef.type || inferSelectorType(candidateRef.selector);
     const candidateMatchMode = candidateRef.matchMode || (selectorType === 'text' ? 'exact' : null);
     const primaryMatchMode = event && event.primarySelectorMatchMode
       ? event.primarySelectorMatchMode
@@ -3239,6 +3242,23 @@ function getTextValue(selectorInfo) {
   return '';
 }
 
+function extractAttributeValue(selector, attrName) {
+  if (!selector || !attrName) return '';
+  // [data-testid="value"] 형식에서 value 추출
+  const attrPattern = new RegExp(`\\[${attrName}\\s*=\\s*["']([^"']+)["']\\]`);
+  const match = selector.match(attrPattern);
+  if (match && match[1]) {
+    return match[1];
+  }
+  // [data-testid*="value"] 형식 (부분 일치)
+  const partialPattern = new RegExp(`\\[${attrName}\\s*\\*=\\s*["']([^"']+)["']\\]`);
+  const partialMatch = selector.match(partialPattern);
+  if (partialMatch && partialMatch[1]) {
+    return partialMatch[1];
+  }
+  return '';
+}
+
 function getXPathValue(selectorInfo) {
   if (!selectorInfo) return '';
   if (selectorInfo.xpathValue) return selectorInfo.xpathValue;
@@ -3321,7 +3341,9 @@ function buildSeleniumFrameSwitchTS(ctx) {
 function buildPlaywrightLocatorExpression(base, selection, languageLower) {
   const selectorType = selection.type || inferSelectorType(selection.selector);
   const pythonLike = languageLower === 'python' || languageLower === 'python-class';
+  
   if (pythonLike) {
+    // Python: text 타입
     if (selectorType === 'text') {
       const textVal = getTextValue(selection);
       if (textVal) {
@@ -3332,14 +3354,42 @@ function buildPlaywrightLocatorExpression(base, selection, languageLower) {
         return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=True)`;
       }
     }
-    if (selectorType === 'xpath') {
+    
+    // Python: xpath 타입
+    if (selectorType === 'xpath' || selectorType === 'xpath-full') {
       const locator = ensureXPathSelector(selection.selector);
       return `${base}.locator("${escapeForPythonString(locator)}")`;
     }
+    
+    // Python: data-testid 타입
+    if (selectorType === 'data-testid') {
+      const testIdValue = extractAttributeValue(selection.selector, 'data-testid');
+      if (testIdValue) {
+        return `${base}.get_by_test_id("${escapeForPythonString(testIdValue)}")`;
+      }
+    }
+    
+    // Python: aria-label 타입
+    if (selectorType === 'aria-label') {
+      const labelValue = extractAttributeValue(selection.selector, 'aria-label');
+      if (labelValue) {
+        return `${base}.get_by_label("${escapeForPythonString(labelValue)}")`;
+      }
+    }
+    
+    // Python: role 타입
+    if (selectorType === 'role') {
+      const roleValue = extractAttributeValue(selection.selector, 'role');
+      if (roleValue) {
+        return `${base}.get_by_role("${escapeForPythonString(roleValue)}")`;
+      }
+    }
+    
+    // Python: 기본 locator
     return `${base}.locator("${escapeForPythonString(selection.selector)}")`;
   }
 
-  // JavaScript / TypeScript
+  // JavaScript / TypeScript: text 타입
   if (selectorType === 'text') {
     const textVal = getTextValue(selection);
     if (textVal) {
@@ -3350,10 +3400,38 @@ function buildPlaywrightLocatorExpression(base, selection, languageLower) {
       return `${base}.getByText("${escapeForJSString(textVal)}", { exact: true })`;
     }
   }
-  if (selectorType === 'xpath') {
+  
+  // JavaScript / TypeScript: xpath 타입
+  if (selectorType === 'xpath' || selectorType === 'xpath-full') {
     const locator = ensureXPathSelector(selection.selector);
     return `${base}.locator("${escapeForJSString(locator)}")`;
   }
+  
+  // JavaScript / TypeScript: data-testid 타입
+  if (selectorType === 'data-testid') {
+    const testIdValue = extractAttributeValue(selection.selector, 'data-testid');
+    if (testIdValue) {
+      return `${base}.getByTestId("${escapeForJSString(testIdValue)}")`;
+    }
+  }
+  
+  // JavaScript / TypeScript: aria-label 타입
+  if (selectorType === 'aria-label') {
+    const labelValue = extractAttributeValue(selection.selector, 'aria-label');
+    if (labelValue) {
+      return `${base}.getByLabel("${escapeForJSString(labelValue)}")`;
+    }
+  }
+  
+  // JavaScript / TypeScript: role 타입
+  if (selectorType === 'role') {
+    const roleValue = extractAttributeValue(selection.selector, 'role');
+    if (roleValue) {
+      return `${base}.getByRole("${escapeForJSString(roleValue)}")`;
+    }
+  }
+  
+  // JavaScript / TypeScript: 기본 locator
   return `${base}.locator("${escapeForJSString(selection.selector)}")`;
 }
 
@@ -3380,84 +3458,116 @@ function buildSeleniumLocatorSpec(selection) {
   return {byPython: 'By.CSS_SELECTOR', byJS: 'By.css', value: cssValue};
 }
 
+function buildPlaywrightLocatorExpressionForAction(base, selectorInfo, pythonLike) {
+  const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
+  
+  if (pythonLike) {
+    // Python: text
+    if (selectorType === 'text') {
+      const textVal = getTextValue(selectorInfo);
+      if (textVal) {
+        const matchMode = selectorInfo.matchMode || 'exact';
+        if (matchMode === 'contains') {
+          return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=False)`;
+        }
+        return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=True)`;
+      }
+    }
+    // Python: xpath
+    if (selectorType === 'xpath' || selectorType === 'xpath-full') {
+      const locator = ensureXPathSelector(selectorInfo.selector);
+      return `${base}.locator("${escapeForPythonString(locator)}")`;
+    }
+    // Python: data-testid
+    if (selectorType === 'data-testid') {
+      const testIdValue = extractAttributeValue(selectorInfo.selector, 'data-testid');
+      if (testIdValue) {
+        return `${base}.get_by_test_id("${escapeForPythonString(testIdValue)}")`;
+      }
+    }
+    // Python: aria-label
+    if (selectorType === 'aria-label') {
+      const labelValue = extractAttributeValue(selectorInfo.selector, 'aria-label');
+      if (labelValue) {
+        return `${base}.get_by_label("${escapeForPythonString(labelValue)}")`;
+      }
+    }
+    // Python: role
+    if (selectorType === 'role') {
+      const roleValue = extractAttributeValue(selectorInfo.selector, 'role');
+      if (roleValue) {
+        return `${base}.get_by_role("${escapeForPythonString(roleValue)}")`;
+      }
+    }
+    // Python: 기본 locator
+    return `${base}.locator("${escapeForPythonString(selectorInfo.selector)}")`;
+  }
+  
+  // JavaScript/TypeScript: text
+  if (selectorType === 'text') {
+    const textVal = getTextValue(selectorInfo);
+    if (textVal) {
+      const matchMode = selectorInfo.matchMode || 'exact';
+      if (matchMode === 'contains') {
+        return `${base}.getByText("${escapeForJSString(textVal)}")`;
+      }
+      return `${base}.getByText("${escapeForJSString(textVal)}", { exact: true })`;
+    }
+  }
+  // JavaScript/TypeScript: xpath
+  if (selectorType === 'xpath' || selectorType === 'xpath-full') {
+    const locator = ensureXPathSelector(selectorInfo.selector);
+    return `${base}.locator("${escapeForJSString(locator)}")`;
+  }
+  // JavaScript/TypeScript: data-testid
+  if (selectorType === 'data-testid') {
+    const testIdValue = extractAttributeValue(selectorInfo.selector, 'data-testid');
+    if (testIdValue) {
+      return `${base}.getByTestId("${escapeForJSString(testIdValue)}")`;
+    }
+  }
+  // JavaScript/TypeScript: aria-label
+  if (selectorType === 'aria-label') {
+    const labelValue = extractAttributeValue(selectorInfo.selector, 'aria-label');
+    if (labelValue) {
+      return `${base}.getByLabel("${escapeForJSString(labelValue)}")`;
+    }
+  }
+  // JavaScript/TypeScript: role
+  if (selectorType === 'role') {
+    const roleValue = extractAttributeValue(selectorInfo.selector, 'role');
+    if (roleValue) {
+      return `${base}.getByRole("${escapeForJSString(roleValue)}")`;
+    }
+  }
+  // JavaScript/TypeScript: 기본 locator
+  return `${base}.locator("${escapeForJSString(selectorInfo.selector)}")`;
+}
+
 function buildPlaywrightPythonAction(ev, selectorInfo, base = 'page') {
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
-  const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
+  const locatorExpr = buildPlaywrightLocatorExpressionForAction(base, selectorInfo, true);
   const value = escapeForPythonString(ev.value || '');
+  
   if (ev.action === 'click') {
-    if (selectorType === 'text') {
-      const textVal = getTextValue(selectorInfo);
-      if (textVal) {
-        const matchMode = selectorInfo.matchMode || 'exact';
-        if (matchMode === 'contains') {
-          return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=False).click()`;
-        }
-        return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=True).click()`;
-      }
-    }
-    if (selectorType === 'xpath') {
-      const locator = ensureXPathSelector(selectorInfo.selector);
-      return `${base}.locator("${escapeForPythonString(locator)}").click()`;
-    }
-    return `${base}.click("${escapeForPythonString(selectorInfo.selector)}")`;
+    return `${locatorExpr}.click()`;
   }
   if (ev.action === 'input') {
-    if (selectorType === 'text') {
-      const textVal = getTextValue(selectorInfo);
-      if (textVal) {
-        const matchMode = selectorInfo.matchMode || 'exact';
-        if (matchMode === 'contains') {
-          return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=False).fill("${value}")`;
-        }
-        return `${base}.get_by_text("${escapeForPythonString(textVal)}", exact=True).fill("${value}")`;
-      }
-    }
-    if (selectorType === 'xpath') {
-      const locator = ensureXPathSelector(selectorInfo.selector);
-      return `${base}.locator("${escapeForPythonString(locator)}").fill("${value}")`;
-    }
-    return `${base}.fill("${escapeForPythonString(selectorInfo.selector)}", "${value}")`;
+    return `${locatorExpr}.fill("${value}")`;
   }
   return null;
 }
 
 function buildPlaywrightJSAction(ev, selectorInfo, base = 'page') {
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
-  const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
+  const locatorExpr = buildPlaywrightLocatorExpressionForAction(base, selectorInfo, false);
   const value = escapeForJSString(ev.value || '');
+  
   if (ev.action === 'click') {
-    if (selectorType === 'text') {
-      const textVal = getTextValue(selectorInfo);
-      if (textVal) {
-        const matchMode = selectorInfo.matchMode || 'exact';
-        if (matchMode === 'contains') {
-          return `await ${base}.getByText("${escapeForJSString(textVal)}").click();`;
-        }
-        return `await ${base}.getByText("${escapeForJSString(textVal)}", { exact: true }).click();`;
-      }
-    }
-    if (selectorType === 'xpath') {
-      const locator = ensureXPathSelector(selectorInfo.selector);
-      return `await ${base}.locator("${escapeForJSString(locator)}").click();`;
-    }
-    return `await ${base}.click("${escapeForJSString(selectorInfo.selector)}");`;
+    return `await ${locatorExpr}.click();`;
   }
   if (ev.action === 'input') {
-    if (selectorType === 'text') {
-      const textVal = getTextValue(selectorInfo);
-      if (textVal) {
-        const matchMode = selectorInfo.matchMode || 'exact';
-        if (matchMode === 'contains') {
-          return `await ${base}.getByText("${escapeForJSString(textVal)}").fill("${value}");`;
-        }
-        return `await ${base}.getByText("${escapeForJSString(textVal)}", { exact: true }).fill("${value}");`;
-      }
-    }
-    if (selectorType === 'xpath') {
-      const locator = ensureXPathSelector(selectorInfo.selector);
-      return `await ${base}.locator("${escapeForJSString(locator)}").fill("${value}");`;
-    }
-    return `await ${base}.fill("${escapeForJSString(selectorInfo.selector)}", "${value}");`;
+    return `await ${locatorExpr}.fill("${value}");`;
   }
   return null;
 }

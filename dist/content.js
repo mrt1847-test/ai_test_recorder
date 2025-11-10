@@ -1097,8 +1097,38 @@
     const rawText = (element.innerText || element.textContent || "").trim().split("\n").map((t) => t.trim()).filter(Boolean)[0];
     if (rawText) {
       const truncatedText = rawText.slice(0, 60);
+      const textSelector = `text="${escapeAttributeValue(truncatedText)}"`;
+      let textMatchCount = null;
+      try {
+        const parsed = parseSelectorForMatching(textSelector, "text");
+        textMatchCount = countMatchesForSelector(parsed, document, { matchMode: "exact", maxCount: 6 });
+      } catch (e) {
+        textMatchCount = null;
+      }
+      const reasonParts = ["\uD14D\uC2A4\uD2B8 \uC77C\uCE58"];
+      if (typeof textMatchCount === "number") {
+        if (textMatchCount === 1) {
+          reasonParts.push("1\uAC1C \uC694\uC18C\uC640 \uC77C\uCE58");
+        } else if (textMatchCount > 1) {
+          reasonParts.push(`${textMatchCount}\uAC1C \uC694\uC18C\uC640 \uC77C\uCE58`);
+        } else if (textMatchCount === 0) {
+          reasonParts.push("\uC77C\uCE58 \uC5C6\uC74C");
+        }
+      } else {
+        reasonParts.push("\uC77C\uCE58 \uAC1C\uC218 \uACC4\uC0B0 \uBD88\uAC00");
+      }
+      registry.add({
+        type: "text",
+        selector: textSelector,
+        score: DEFAULT_TEXT_SCORE,
+        reason: reasonParts.filter(Boolean).join(" \u2022 "),
+        textValue: truncatedText,
+        matchMode: "exact",
+        unique: textMatchCount === 1,
+        matchCount: textMatchCount
+      });
       const textCandidate = enrichCandidateWithUniqueness(
-        { type: "text", selector: `text="${escapeAttributeValue(truncatedText)}"`, score: DEFAULT_TEXT_SCORE, reason: "\uD14D\uC2A4\uD2B8 \uC77C\uCE58", textValue: truncatedText },
+        { type: "text", selector: `text="${escapeAttributeValue(truncatedText)}"`, score: DEFAULT_TEXT_SCORE - 3, reason: "\uD14D\uC2A4\uD2B8 \uC870\uD569", textValue: truncatedText },
         { duplicateScore: 55, element }
       );
       if (textCandidate) {

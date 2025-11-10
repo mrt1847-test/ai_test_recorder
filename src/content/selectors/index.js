@@ -802,8 +802,40 @@ export function getSelectorCandidates(element) {
   const rawText = (element.innerText || element.textContent || '').trim().split('\n').map((t) => t.trim()).filter(Boolean)[0];
   if (rawText) {
     const truncatedText = rawText.slice(0, 60);
+    const textSelector = `text="${escapeAttributeValue(truncatedText)}"`;
+    let textMatchCount = null;
+    try {
+      const parsed = parseSelectorForMatching(textSelector, 'text');
+      textMatchCount = countMatchesForSelector(parsed, document, { matchMode: 'exact', maxCount: 6 });
+    } catch (e) {
+      textMatchCount = null;
+    }
+    const reasonParts = ['텍스트 일치'];
+    if (typeof textMatchCount === 'number') {
+      if (textMatchCount === 1) {
+        reasonParts.push('1개 요소와 일치');
+      } else if (textMatchCount > 1) {
+        reasonParts.push(`${textMatchCount}개 요소와 일치`);
+      } else if (textMatchCount === 0) {
+        reasonParts.push('일치 없음');
+      }
+    } else {
+      reasonParts.push('일치 개수 계산 불가');
+    }
+    registry.add({
+      type: 'text',
+      selector: textSelector,
+      score: DEFAULT_TEXT_SCORE,
+      reason: reasonParts.filter(Boolean).join(' • '),
+      textValue: truncatedText,
+      matchMode: 'exact',
+      unique: textMatchCount === 1,
+      matchCount: textMatchCount
+    });
+    
+    // 2. 기존 로직: 유일성 검증 + 조합 셀렉터 생성
     const textCandidate = enrichCandidateWithUniqueness(
-      { type: 'text', selector: `text="${escapeAttributeValue(truncatedText)}"`, score: DEFAULT_TEXT_SCORE, reason: '텍스트 일치', textValue: truncatedText },
+      { type: 'text', selector: `text="${escapeAttributeValue(truncatedText)}"`, score: DEFAULT_TEXT_SCORE - 3, reason: '텍스트 조합', textValue: truncatedText },
       { duplicateScore: 55, element }
     );
     if (textCandidate) {

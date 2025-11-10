@@ -75,6 +75,8 @@ select:focus{outline:none;border-color:#0ea5a0;box-shadow:0 0 0 2px rgba(14,165,
 #code-editor{border:1px solid #d0d7e2;border-radius:10px;background:#fff;overflow:hidden}
 #code-editor .CodeMirror{min-height:320px;height:auto;font-family:"Fira Code",Consolas,"Courier New",monospace;font-size:15px;line-height:1.6}
 #code-editor .CodeMirror-focused{outline:none}
+#code-editor .CodeMirror-scroll{overflow-x:auto}
+#code-editor .CodeMirror-hscrollbar,#code-editor .CodeMirror-scrollbar-filler{display:none!important}
 #main-top{display:flex;gap:12px;align-items:flex-start}
 #timeline-panel{flex:1 1 0%;min-width:160px;background:#fff;padding:8px;border-radius:8px;min-height:300px;box-shadow:0 2px 8px rgba(0,0,0,0.05);display:flex;flex-direction:column;gap:8px}
 #timeline{flex:1 1 auto;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:6px}
