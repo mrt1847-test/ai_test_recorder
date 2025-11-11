@@ -7,6 +7,7 @@ const codeOutput = document.getElementById('code-output');
 const logEntries = document.getElementById('log-entries');
 const resetBtn = document.getElementById('reset-btn');
 const elementSelectBtn = document.getElementById('element-select-btn');
+const deleteEventBtn = document.getElementById('delete-event-btn');
 const elementPanel = document.getElementById('element-panel');
 const elementStatusEl = document.getElementById('element-status');
 const elementPathContainer = document.getElementById('element-path');
@@ -56,6 +57,12 @@ const DOM_COMPLETE_DELAY_MS = 250;
 const MAX_NAVIGATION_WAIT_MS = 15000;
 const EVENT_SCHEMA_VERSION = 2;
 let codeEditor = null;
+
+function updateDeleteButtonState() {
+  if (!deleteEventBtn) return;
+  const hasSelection = currentEventIndex >= 0 && currentEventIndex < allEvents.length;
+  deleteEventBtn.disabled = !hasSelection;
+}
 
 function getCodeText() {
   if (codeEditor) {
@@ -112,6 +119,7 @@ function initCodeEditor() {
 }
 
 initCodeEditor();
+updateDeleteButtonState();
 
 function normalizeEventRecord(event) {
   if (!event || typeof event !== 'object') return event;
@@ -835,6 +843,7 @@ function triggerStartRecording(options = {}, callback) {
       setCodeText('');
       logEntries.innerHTML = '';
       currentEventIndex = -1;
+      updateDeleteButtonState();
     listenEvents();
 
       sendMessageWithInjection(currentTab.id, {type: 'RECORDING_START'}, (response, error) => {
@@ -989,6 +998,7 @@ resetBtn.addEventListener('click', () => {
     setCodeText('');
     logEntries.innerHTML = '';
     currentEventIndex = -1;
+    updateDeleteButtonState();
     // 모든 탭에 녹화 중지 메시지 전송
     withActiveTab((tab) => {
       if (tab) {
@@ -1003,6 +1013,12 @@ resetBtn.addEventListener('click', () => {
     cancelSelectionWorkflow('요소 선택 흐름이 초기화되었습니다.', 'info');
   });
 });
+
+if (deleteEventBtn) {
+  deleteEventBtn.addEventListener('click', () => {
+    deleteCurrentEvent();
+  });
+}
 
 listenEvents();
 updateCode();
@@ -1122,36 +1138,176 @@ function appendAiMessage(text, tone = 'info') {
   return true;
 }
 
+const selectorTabState = {
+  active: 'unique',
+  grouped: null,
+  event: null,
+  resolvedIndex: null,
+  contentEl: null,
+  buttons: null
+};
+
+function getCandidateMatchCount(candidate) {
+  if (!candidate || typeof candidate !== 'object') return null;
+  if (typeof candidate.matchCount === 'number') return candidate.matchCount;
+  if (typeof candidate.contextMatchCount === 'number') return candidate.contextMatchCount;
+  return null;
+}
+
+function extractAttributes(node) {
+  const attributes = {};
+  if (!node || typeof node !== 'object') return attributes;
+  if (node.attributes && typeof node.attributes === 'object' && !Array.isArray(node.attributes)) {
+    const keys = Object.keys(node.attributes).slice(0, 8);
+    keys.forEach((key) => {
+      attributes[key] = node.attributes[key];
+    });
+  }
+  if (Array.isArray(node.dataAttributes)) {
+    node.dataAttributes.slice(0, 8).forEach((attr) => {
+      if (attr && attr.name) {
+        attributes[attr.name] = attr.value || '';
+      }
+    });
+  }
+  return attributes;
+}
+
+function sanitizeDomNode(node) {
+  if (!node || typeof node !== 'object') return null;
+  const sanitized = {
+    tag: node.tag || null,
+    id: node.id || null,
+    classes: Array.isArray(node.classes) ? node.classes.slice(0, 8) : [],
+    attributes: extractAttributes(node),
+    childCount: typeof node.childCount === 'number' ? node.childCount : null,
+    position: node.position || null,
+    target: false,
+    repeats: false,
+    children: []
+  };
+  if (node.text) {
+    const trimmed = String(node.text).replace(/\s+/g, ' ').trim();
+    sanitized.text = trimmed.length > 160 ? `${trimmed.slice(0, 157)}…` : trimmed;
+  }
+  if (sanitized.position && typeof sanitized.position === 'object') {
+    const total = sanitized.position.total;
+    sanitized.repeats = typeof total === 'number' ? total > 1 : false;
+  }
+  return sanitized;
+}
+
+function buildDomNodes(event) {
+  if (!event || typeof event !== 'object') return [];
+  const nodes = [];
+  const context = event.domContext || {};
+  const ancestors = Array.isArray(context.ancestors) ? context.ancestors.slice(-12) : [];
+  ancestors.forEach((ancestor) => {
+    const node = sanitizeDomNode(ancestor);
+    if (node) nodes.push(node);
+  });
+
+  const targetRaw = event.target || null;
+  const targetNode = sanitizeDomNode(targetRaw);
+  if (targetNode) {
+    targetNode.target = true;
+    const childNodes = Array.isArray(context.children) ? context.children.slice(0, 12) : [];
+    targetNode.children = childNodes.map((child) => sanitizeDomNode(child)).filter(Boolean);
+    nodes.push(targetNode);
+  }
+
+  return nodes;
+}
+
+function sanitizeTarget(target) {
+  if (!target || typeof target !== 'object') return null;
+  const sanitized = {
+    tag: target.tag || null,
+    id: target.id || null,
+    classes: Array.isArray(target.classes) ? target.classes.slice(0, 8) : [],
+    attributes: extractAttributes(target),
+    childCount: typeof target.childCount === 'number' ? target.childCount : null,
+    position: target.position && typeof target.position === 'object'
+      ? {
+          index: typeof target.position.index === 'number' ? target.position.index : null,
+          nthOfType: typeof target.position.nthOfType === 'number' ? target.position.nthOfType : null,
+          total: typeof target.position.total === 'number' ? target.position.total : null
+        }
+      : null,
+    repeats: target.repeats === true || (target.position && typeof target.position.total === 'number'
+      ? target.position.total > 1
+      : false)
+  };
+  if (target.text) {
+    const trimmed = String(target.text).replace(/\s+/g, ' ').trim();
+    sanitized.text = trimmed.length > 160 ? `${trimmed.slice(0, 157)}…` : trimmed;
+  }
+  return sanitized;
+}
+
 function buildAiRequestPayload(event) {
   if (!event || typeof event !== 'object') return null;
+  const iframeContext = event.iframeContext || (event.frame && event.frame.iframeContext) || null;
+  const domNodes = buildDomNodes(event);
   return {
     action: event.action || null,
     value: event.value !== undefined ? event.value : null,
     timestamp: event.timestamp || null,
-    selectorCandidates: Array.isArray(event.selectorCandidates) ? event.selectorCandidates : [],
-    primarySelector: event.primarySelector || null,
-    primarySelectorType: event.primarySelectorType || null,
-    primarySelectorMatchMode: event.primarySelectorMatchMode || null,
-    iframeContext: event.iframeContext || (event.frame && event.frame.iframeContext) || null,
-    domContext: event.domContext || (event.target && event.target.domContext) || null,
-    page: event.page || null,
-    metadata: event.metadata || {},
-    target: event.target || null,
+    iframeContext,
+    dom: domNodes.length ? { nodes: domNodes } : null,
+    target: sanitizeTarget(event.target),
+    page: event.page ? { url: event.page.url || null, title: event.page.title || null } : null,
     clientRect: event.clientRect || null,
-    manual: event.manual || null
+    metadata: event.metadata && typeof event.metadata === 'object'
+      ? {
+          schemaVersion: event.metadata.schemaVersion || EVENT_SCHEMA_VERSION,
+          userAgent: event.metadata.userAgent || null,
+          domEvent: event.metadata.domEvent || null
+        }
+      : null,
+    prompt: {
+      goal: '주어진 이벤트와 DOM 스냅샷을 분석해 안정적인 셀렉터 후보를 찾는다',
+      constraints: [
+        '출력은 JSON 객체만 허용하며, 최상위 키는 "candidates" 하나여야 한다',
+        '변동성이 상품명이나 숫자 는 지양한다',
+        '"candidates" 값은 최대 5개의 항목을 가진 배열이어야 한다',
+        '각 배열 항목은 { "selector": string, "reason": string } 형태여야 한다',
+        '추가 설명, 예시 코드, 텍스트 문단 등은 금지한다'
+      ]
+    }
   };
 }
 
 function normalizeAiCandidates(candidates) {
   if (!Array.isArray(candidates)) return [];
+  const seen = new Set();
   return candidates
     .map((candidate) => {
       if (!candidate || typeof candidate !== 'object') return null;
       const selector = typeof candidate.selector === 'string' ? candidate.selector.trim() : '';
       if (!selector) return null;
+      if (seen.has(selector)) {
+        return null;
+      }
+      seen.add(selector);
       const normalized = { ...candidate, selector };
       normalized.type = normalized.type || inferSelectorType(selector);
       normalized.reason = normalized.reason || 'AI 추천';
+      if (normalized.rawSelector === undefined) {
+        normalized.rawSelector = candidate.rawSelector || selector;
+      }
+      if (normalized.rawType === undefined) {
+        normalized.rawType = candidate.rawType || normalized.type;
+      }
+      if (normalized.rawMatchCount === undefined && typeof normalized.matchCount === 'number') {
+        normalized.rawMatchCount = normalized.matchCount;
+      }
+      if (normalized.rawUnique === undefined && typeof normalized.unique === 'boolean') {
+        normalized.rawUnique = normalized.unique;
+      }
+      if (normalized.rawReason === undefined && normalized.reason) {
+        normalized.rawReason = normalized.reason;
+      }
       if (normalized.type !== 'text') {
         delete normalized.matchMode;
         delete normalized.textValue;
@@ -1325,10 +1481,101 @@ function renderAiRequestControls(event, resolvedIndex) {
     'AI가 이벤트 컨텍스트와 테스트 목적을 분석해 안정적인 셀렉터를 추천합니다.'
   );
   buttonWrapper.appendChild(button);
+  const copyButtonWrapper = document.createElement('div');
+  copyButtonWrapper.className = 'selector-ai-button-wrapper';
+  copyButtonWrapper.setAttribute(
+    'data-tooltip',
+    '현재 이벤트와 컨텍스트로 생성된 AI 요청 프롬프트를 클립보드에 복사합니다.'
+  );
+  const copyButton = document.createElement('button');
+  copyButton.className = 'selector-ai-button ghost';
+  copyButton.textContent = '프롬프트 복사';
+  if (!hasEvent) {
+    copyButton.disabled = true;
+  }
+  copyButton.addEventListener('click', () => {
+    if (!hasEvent) return;
+    copyAiSelectorRequest(event);
+  });
+  copyButtonWrapper.appendChild(copyButton);
   actions.appendChild(buttonWrapper);
+  actions.appendChild(copyButtonWrapper);
   actions.appendChild(statusEl);
   header.appendChild(actions);
   selectorList.appendChild(header);
+}
+
+function legacyCopyToClipboard(text) {
+  return new Promise((resolve, reject) => {
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      textarea.style.pointerEvents = 'none';
+      document.body.appendChild(textarea);
+      textarea.focus({ preventScroll: true });
+      textarea.select();
+      const successful = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      if (!successful) {
+        reject(new Error('execCommand copy failed'));
+        return;
+      }
+      resolve();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+function copyTextToClipboard(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    return navigator.clipboard.writeText(text).catch((err) => {
+      console.warn('[AI Test Recorder] navigator.clipboard.writeText failed, falling back:', err);
+      return legacyCopyToClipboard(text);
+    });
+  }
+  return legacyCopyToClipboard(text);
+}
+
+function buildAiSelectorPrompt(event) {
+  const payload = buildAiRequestPayload(event);
+  if (!payload) return null;
+  const requestContext = {
+    testCase: document.getElementById('test-purpose') ? (document.getElementById('test-purpose').value || '') : '',
+    testUrl: document.getElementById('test-url') ? (document.getElementById('test-url').value || '') : '',
+    framework: selectedFramework,
+    language: selectedLanguage,
+    aiModel: aiSettings.model || '',
+    tabId: inspectedTabId
+  };
+  const requestEnvelope = {
+    type: 'REQUEST_AI_SELECTORS',
+    event: payload,
+    context: requestContext
+  };
+  return JSON.stringify(requestEnvelope, null, 2);
+}
+
+function copyAiSelectorRequest(event) {
+  if (!event) {
+    alert('타임라인에서 이벤트를 먼저 선택하세요.');
+    return;
+  }
+  const promptText = buildAiSelectorPrompt(event);
+  if (!promptText) {
+    alert('이벤트 정보가 부족해 프롬프트를 생성할 수 없습니다.');
+    return;
+  }
+  copyTextToClipboard(promptText)
+    .then(() => {
+      alert('AI 요청 프롬프트를 클립보드에 복사했습니다.');
+    })
+    .catch((error) => {
+      console.error('[AI Test Recorder] Failed to copy AI prompt:', error);
+      alert(`프롬프트 복사에 실패했습니다: ${error.message}`);
+    });
 }
 
 function applyOverlayVisibility(visible, options = {}) {
@@ -1387,6 +1634,29 @@ function refreshSelectorListForCurrentEvent() {
     const currentEvent = allEvents[currentEventIndex];
     showSelectors(currentEvent.selectorCandidates || [], currentEvent, currentEventIndex);
   }
+}
+
+function deleteCurrentEvent() {
+  if (currentEventIndex < 0 || currentEventIndex >= allEvents.length) return;
+  const targetIndex = currentEventIndex;
+  const updatedEvents = allEvents.slice();
+  updatedEvents.splice(targetIndex, 1);
+  chrome.storage.local.set({ events: updatedEvents }, () => {
+    if (chrome.runtime.lastError) {
+      console.error('[AI Test Recorder] Failed to delete event:', chrome.runtime.lastError);
+      alert('이벤트를 삭제할 수 없습니다. 다시 시도해주세요.');
+      return;
+    }
+    const nextIndex = updatedEvents.length > 0 ? Math.min(targetIndex, updatedEvents.length - 1) : -1;
+    currentEventIndex = nextIndex;
+    const normalized = syncTimelineFromEvents(updatedEvents, {
+      preserveSelection: nextIndex !== -1,
+      selectLast: false,
+      resetAiState: false
+    });
+    updateDeleteButtonState();
+    updateCode({ preloadedEvents: normalized });
+  });
 }
 
 function syncTimelineFromEvents(events, options = {}) {
@@ -1459,6 +1729,7 @@ function syncTimelineFromEvents(events, options = {}) {
     showIframe(null);
   }
 
+  updateDeleteButtonState();
   return normalizedEvents;
 }
 
@@ -1499,6 +1770,7 @@ function listenEvents() {
       }
       showSelectors(normalizedEvent.selectorCandidates || [], normalizedEvent, index);
       showIframe(normalizedEvent.iframeContext);
+      updateDeleteButtonState();
       // 실시간 코드 업데이트
       updateCode({ preloadedEvents: allEvents });
     }
@@ -1616,6 +1888,7 @@ function appendTimelineItem(ev, index) {
       // 해당 이벤트의 셀렉터 표시
       showSelectors(ev.selectorCandidates || [], ev, index);
       showIframe(ev.iframeContext);
+      updateDeleteButtonState();
   });
   timeline.appendChild(div);
 }
@@ -1628,46 +1901,17 @@ function showSelectors(list, event, eventIndex) {
   const resolvedIndex = hasEventContext
     ? (eventIndex !== undefined && eventIndex !== null ? eventIndex : allEvents.indexOf(event))
     : -1;
-  let hasAiContent = false;
 
   renderAiRequestControls(event, resolvedIndex);
 
-  if (hasEventContext) {
-    const state = getAiState(event);
-    const aiCandidates = Array.isArray(event.aiSelectorCandidates) ? event.aiSelectorCandidates : [];
-    if (state.status === 'loading') {
-      hasAiContent = appendAiMessage('AI가 추천 셀렉터를 분석하는 중입니다...', 'loading') || hasAiContent;
-    } else if (state.status === 'error') {
-      hasAiContent = appendAiMessage(state.error || 'AI 추천을 불러오지 못했습니다.', 'error') || hasAiContent;
-    } else if (aiCandidates.length === 0) {
-      hasAiContent = appendAiMessage('AI 추천 후보가 아직 없습니다.', 'empty') || hasAiContent;
-    }
-    if (aiCandidates.length > 0) {
-      const aiHeader = document.createElement('div');
-      aiHeader.className = 'selector-section-title';
-      aiHeader.textContent = 'AI 추천';
-      selectorList.appendChild(aiHeader);
-      renderSelectorGroup(aiCandidates, {
-        source: 'ai',
-        event,
-        resolvedIndex,
-        listRef: aiCandidates
-      });
-      hasAiContent = true;
-    }
-  } else {
-    appendAiMessage('AI 추천 후보가 아직 없습니다.', 'empty');
-  }
-
-  const baseCandidates = hasEventContext
-    ? (event && Array.isArray(event.selectorCandidates) ? event.selectorCandidates : [])
-    : (list || []);
-
   if (!hasEventContext) {
+    selectorTabState.grouped = null;
+    selectorTabState.contentEl = null;
+    selectorTabState.buttons = null;
+    const baseCandidates = Array.isArray(list) ? list : [];
     if (!Array.isArray(baseCandidates) || baseCandidates.length === 0) {
       const emptyMessage = document.createElement('div');
-      emptyMessage.style.padding = '10px';
-      emptyMessage.style.color = '#666';
+      emptyMessage.className = 'selector-empty';
       emptyMessage.textContent = '셀렉터 후보가 없습니다.';
       selectorList.appendChild(emptyMessage);
       return;
@@ -1676,28 +1920,87 @@ function showSelectors(list, event, eventIndex) {
       source: 'base',
       event: null,
       resolvedIndex,
-      listRef: baseCandidates
+      listRef: baseCandidates,
+      container: selectorList
     });
     return;
   }
 
-  if (Array.isArray(baseCandidates) && baseCandidates.length > 0) {
-    const header = document.createElement('div');
-    header.className = 'selector-section-title';
-    header.textContent = '기본 추천';
-    selectorList.appendChild(header);
-    renderSelectorGroup(baseCandidates, {
-      source: 'base',
-      event,
-      resolvedIndex,
-      listRef: baseCandidates
-    });
-  } else if (!hasAiContent) {
+  const aiState = getAiState(event);
+  const aiCandidates = Array.isArray(event.aiSelectorCandidates) ? event.aiSelectorCandidates : [];
+  if (aiState.status === 'loading') {
+    appendAiMessage('AI가 추천 셀렉터를 분석하는 중입니다...', 'loading');
+  } else if (aiState.status === 'error') {
+    appendAiMessage(aiState.error || 'AI 추천을 불러오지 못했습니다.', 'error');
+  } else if (aiCandidates.length === 0) {
+    appendAiMessage('AI 추천 후보가 아직 없습니다.', 'empty');
+  }
+
+  const baseCandidates = Array.isArray(event.selectorCandidates) ? event.selectorCandidates : [];
+  const grouped = buildSelectorTabGroups(event, baseCandidates, aiCandidates);
+  selectorTabState.grouped = grouped;
+  selectorTabState.event = event;
+  selectorTabState.resolvedIndex = resolvedIndex;
+
+  const uniqueCount = getGroupCount(grouped.unique);
+  const repeatCount = getGroupCount(grouped.repeat);
+
+  let desiredActive = selectorTabState.active;
+  if (desiredActive !== 'unique' && desiredActive !== 'repeat') {
+    desiredActive = 'unique';
+  }
+  if (desiredActive === 'unique' && uniqueCount === 0 && repeatCount > 0) {
+    desiredActive = 'repeat';
+  } else if (desiredActive === 'repeat' && repeatCount === 0 && uniqueCount > 0) {
+    desiredActive = 'unique';
+  }
+  selectorTabState.active = desiredActive;
+
+  const tabsHeader = document.createElement('div');
+  tabsHeader.className = 'selector-tab-header';
+
+  const uniqueBtn = document.createElement('button');
+  uniqueBtn.type = 'button';
+  uniqueBtn.className = 'selector-tab-button';
+  tabsHeader.appendChild(uniqueBtn);
+
+  const repeatBtn = document.createElement('button');
+  repeatBtn.type = 'button';
+  repeatBtn.className = 'selector-tab-button';
+  tabsHeader.appendChild(repeatBtn);
+
+  selectorList.appendChild(tabsHeader);
+
+  const tabContent = document.createElement('div');
+  tabContent.className = 'selector-tab-content';
+  selectorList.appendChild(tabContent);
+
+  selectorTabState.contentEl = tabContent;
+  selectorTabState.buttons = { unique: uniqueBtn, repeat: repeatBtn };
+
+  uniqueBtn.addEventListener('click', () => {
+    if (getGroupCount(selectorTabState.grouped?.unique) === 0) return;
+    if (selectorTabState.active !== 'unique') {
+      selectorTabState.active = 'unique';
+      updateSelectorTabUI();
+    }
+  });
+
+  repeatBtn.addEventListener('click', () => {
+    if (getGroupCount(selectorTabState.grouped?.repeat) === 0) return;
+    if (selectorTabState.active !== 'repeat') {
+      selectorTabState.active = 'repeat';
+      updateSelectorTabUI();
+    }
+  });
+
+  updateSelectorTabUI();
+
+  if (uniqueCount === 0 && repeatCount === 0) {
     const emptyMessage = document.createElement('div');
-    emptyMessage.style.padding = '10px';
-    emptyMessage.style.color = '#666';
+    emptyMessage.className = 'selector-empty';
     emptyMessage.textContent = '셀렉터 후보가 없습니다.';
-    selectorList.appendChild(emptyMessage);
+    tabContent.appendChild(emptyMessage);
   }
 }
 
@@ -1706,20 +2009,43 @@ function renderSelectorGroup(candidates, options = {}) {
     source = 'base',
     event = null,
     resolvedIndex = -1,
-    listRef = candidates
+    listRef = Array.isArray(candidates) ? candidates : [],
+    container = selectorList,
+    allowNonUnique = false,
+    indices = null,
+    mode = 'default'
   } = options;
 
-  if (!Array.isArray(candidates) || candidates.length === 0) return;
+  const iterateIndices = Array.isArray(indices)
+    ? indices
+    : Array.isArray(listRef)
+      ? listRef.map((_, idx) => idx)
+      : Array.isArray(candidates)
+        ? candidates.map((_, idx) => idx)
+        : [];
 
-  candidates.forEach((candidate, listIndex) => {
-    const candidateRef = listRef && listRef[listIndex] ? listRef[listIndex] : candidate;
+  if (!container || !Array.isArray(iterateIndices) || iterateIndices.length === 0) return;
+
+  iterateIndices.forEach((listIndex) => {
+    const candidateRef = Array.isArray(listRef) && listRef[listIndex]
+      ? listRef[listIndex]
+      : (Array.isArray(candidates) ? candidates[listIndex] : null);
     if (!candidateRef || !candidateRef.selector) return;
-    const selectorType = candidateRef.type || inferSelectorType(candidateRef.selector);
-    const matchCount = typeof candidateRef.matchCount === 'number' ? candidateRef.matchCount : null;
-    const contextMatchCount = typeof candidateRef.contextMatchCount === 'number' ? candidateRef.contextMatchCount : null;
+    const displayCandidate = (mode === 'repeat' && candidateRef.rawSelector)
+      ? {
+          ...candidateRef,
+          selector: candidateRef.rawSelector,
+          type: candidateRef.rawType || candidateRef.type || inferSelectorType(candidateRef.rawSelector),
+          matchCount: candidateRef.rawMatchCount !== undefined ? candidateRef.rawMatchCount : candidateRef.matchCount,
+          reason: candidateRef.rawReason || candidateRef.reason || ''
+        }
+      : candidateRef;
+    const selectorType = displayCandidate.type || inferSelectorType(displayCandidate.selector);
+    const matchCount = typeof displayCandidate.matchCount === 'number' ? displayCandidate.matchCount : null;
+    const contextMatchCount = typeof displayCandidate.contextMatchCount === 'number' ? displayCandidate.contextMatchCount : null;
     const effectiveCount = matchCount !== null ? matchCount : contextMatchCount;
     const isTextSelector = selectorType === 'text';
-    if (!isTextSelector) {
+    if (!allowNonUnique && !isTextSelector) {
       if (effectiveCount !== null && effectiveCount !== 1) {
         return;
       }
@@ -1729,39 +2055,41 @@ function renderSelectorGroup(candidates, options = {}) {
     }
     const item = document.createElement('div');
     item.className = 'selector-item';
-    const candidateMatchMode = candidateRef.matchMode || (selectorType === 'text' ? 'exact' : null);
+    const candidateMatchMode = displayCandidate.matchMode || candidateRef.matchMode || (selectorType === 'text' ? 'exact' : null);
     const primaryMatchMode = event && event.primarySelectorMatchMode
       ? event.primarySelectorMatchMode
       : (selectorType === 'text' ? 'exact' : null);
     const isApplied =
       !!event &&
       event.primarySelector === candidateRef.selector &&
-      (event.primarySelectorType ? event.primarySelectorType === selectorType : true) &&
+      (event.primarySelectorType ? event.primarySelectorType === (candidateRef.type || selectorType) : true) &&
       (selectorType !== 'text' || candidateMatchMode === primaryMatchMode);
-    const scoreLabel = typeof candidateRef.score === 'number' ? `${candidateRef.score}%` : '';
+    const scoreLabel = typeof displayCandidate.score === 'number'
+      ? `${displayCandidate.score}%`
+      : (typeof candidateRef.score === 'number' ? `${candidateRef.score}%` : '');
     const typeLabel = (selectorType || 'css').toUpperCase();
     item.innerHTML = `
       <div class="selector-main">
         <span class="type">${typeLabel}</span>
-        <span class="sel">${candidateRef.selector}</span>
+        <span class="sel">${displayCandidate.selector}</span>
         <span class="score">${scoreLabel}</span>
       </div>
       <div class="selector-actions">
         <button class="apply-btn" ${isApplied ? 'style="background: #4CAF50; color: white;"' : ''}>${isApplied ? '✓ 적용됨' : 'Apply'}</button>
         <button class="highlight-btn">Highlight</button>
       </div>
-      <div class="reason">${candidateRef.reason || ''}</div>`;
+      <div class="reason">${displayCandidate.reason || candidateRef.reason || ''}</div>`;
 
     const applyBtn = item.querySelector('.apply-btn');
     const highlightBtn = item.querySelector('.highlight-btn');
     if (applyBtn) {
       applyBtn.addEventListener('click', () => {
-        applySelector({ ...candidateRef }, resolvedIndex, source, listIndex);
+        applySelector({ ...displayCandidate }, resolvedIndex, source, listIndex);
       });
     }
     if (highlightBtn) {
       highlightBtn.addEventListener('click', () => {
-        highlightSelector(candidateRef);
+        highlightSelector(displayCandidate);
       });
     }
 
@@ -1825,12 +2153,255 @@ function renderSelectorGroup(candidates, options = {}) {
       updateButtons();
     }
 
-    selectorList.appendChild(item);
+    if (mode === 'repeat') {
+      const positionInfo = getTargetPositionInfo(event);
+      const metaLines = [];
+      const displayCount = typeof matchCount === 'number'
+        ? matchCount
+        : (typeof candidateRef.rawMatchCount === 'number' ? candidateRef.rawMatchCount : effectiveCount);
+      if (typeof displayCount === 'number') {
+        metaLines.push(`현재 ${displayCount}개 요소와 일치`);
+      }
+      if (positionInfo && positionInfo.nthOfType) {
+        metaLines.push(`선택 시 :nth-of-type(${positionInfo.nthOfType}) 자동 적용`);
+      }
+      if (metaLines.length) {
+        const note = document.createElement('div');
+        note.className = 'selector-repeat-note';
+        note.textContent = metaLines.join(' • ');
+        item.appendChild(note);
+      }
+    }
+
+    container.appendChild(item);
   });
+}
+
+function buildSelectorTabGroups(event, baseCandidates, aiCandidates) {
+  const safeBase = Array.isArray(baseCandidates) ? baseCandidates : [];
+  const safeAi = Array.isArray(aiCandidates) ? aiCandidates : [];
+  const createGroup = (listRef) => ({
+    listRef,
+    indices: []
+  });
+  const groups = {
+    unique: {
+      base: createGroup(safeBase),
+      ai: createGroup(safeAi)
+    },
+    repeat: {
+      base: createGroup(safeBase),
+      ai: createGroup(safeAi)
+    }
+  };
+
+  const addIndex = (group, source, index) => {
+    const arr = group[source].indices;
+    if (!arr.includes(index)) {
+      arr.push(index);
+    }
+  };
+
+  const assign = (listRef, source) => {
+    if (!Array.isArray(listRef)) return;
+    listRef.forEach((candidate, index) => {
+      if (!candidate || !candidate.selector) return;
+      const finalMatchCount = typeof candidate.matchCount === 'number' ? candidate.matchCount : null;
+      const rawMatchCount = typeof candidate.rawMatchCount === 'number' ? candidate.rawMatchCount : finalMatchCount;
+      const finalUnique = candidate.unique === true || finalMatchCount === 1;
+      if (finalUnique) {
+        addIndex(groups.unique, source, index);
+      }
+      if ((typeof rawMatchCount === 'number' && rawMatchCount > 1) || candidate.unique === false) {
+        addIndex(groups.repeat, source, index);
+      } else if (!finalUnique && (rawMatchCount === null || rawMatchCount === undefined)) {
+        addIndex(groups.repeat, source, index);
+      }
+    });
+  };
+
+  assign(safeBase, 'base');
+  assign(safeAi, 'ai');
+
+  return groups;
+}
+
+function getGroupCount(group) {
+  if (!group) return 0;
+  const baseCount = Array.isArray(group.base?.indices) ? group.base.indices.length : 0;
+  const aiCount = Array.isArray(group.ai?.indices) ? group.ai.indices.length : 0;
+  return baseCount + aiCount;
+}
+
+function updateSelectorTabUI() {
+  const {
+    grouped,
+    active,
+    contentEl,
+    buttons,
+    event,
+    resolvedIndex
+  } = selectorTabState;
+  if (!grouped || !contentEl) return;
+
+  const uniqueCount = getGroupCount(grouped.unique);
+  const repeatCount = getGroupCount(grouped.repeat);
+
+  if (buttons && buttons.unique) {
+    buttons.unique.textContent = `유일 후보 (${uniqueCount})`;
+    buttons.unique.classList.toggle('active', active === 'unique');
+    buttons.unique.disabled = uniqueCount === 0;
+  }
+  if (buttons && buttons.repeat) {
+    buttons.repeat.textContent = `반복 구조 후보 (${repeatCount})`;
+    buttons.repeat.classList.toggle('active', active === 'repeat');
+    buttons.repeat.disabled = repeatCount === 0;
+  }
+
+  contentEl.innerHTML = '';
+  const currentGroup = grouped[active];
+  if (!currentGroup) {
+    const empty = document.createElement('div');
+    empty.className = 'selector-empty';
+    empty.textContent = '셀렉터 후보가 없습니다.';
+    contentEl.appendChild(empty);
+    return;
+  }
+
+  const allowNonUnique = active === 'repeat';
+  const mode = allowNonUnique ? 'repeat' : 'default';
+
+  if (active === 'repeat') {
+    const info = document.createElement('div');
+    info.className = 'selector-repeat-info';
+    info.textContent = '반복 구조 후보는 선택 시 위치 기반 :nth-of-type()이 자동 적용됩니다.';
+    contentEl.appendChild(info);
+  }
+
+  const renderSection = (title, data, source) => {
+    if (!data || !Array.isArray(data.indices) || data.indices.length === 0) return;
+    const header = document.createElement('div');
+    header.className = 'selector-section-title';
+    header.textContent = title;
+    contentEl.appendChild(header);
+    renderSelectorGroup(data.listRef || [], {
+      source,
+      event,
+      resolvedIndex,
+      listRef: data.listRef || [],
+      container: contentEl,
+      allowNonUnique,
+      indices: data.indices,
+      mode
+    });
+  };
+
+  const hasAi = Array.isArray(currentGroup.ai?.indices) && currentGroup.ai.indices.length > 0;
+  const hasBase = Array.isArray(currentGroup.base?.indices) && currentGroup.base.indices.length > 0;
+
+  renderSection('AI 추천', currentGroup.ai, 'ai');
+  renderSection('기본 추천', currentGroup.base, 'base');
+
+  if (!hasAi && !hasBase) {
+    const empty = document.createElement('div');
+    empty.className = 'selector-empty';
+    empty.textContent = active === 'repeat'
+      ? '반복 구조 후보가 없습니다.'
+      : '유일 후보가 없습니다.';
+    contentEl.appendChild(empty);
+  }
 }
 
 function showIframe(ctx) {
   if (ctx) iframeBanner.classList.remove('hidden'); else iframeBanner.classList.add('hidden');
+}
+
+function getTargetPositionInfo(event) {
+  if (!event || typeof event !== 'object') return null;
+  const target = event.target || null;
+  const extractFromPosition = (pos, source) => {
+    if (!pos || typeof pos !== 'object') return null;
+    const nth = typeof pos.nthOfType === 'number' ? pos.nthOfType : null;
+    if (!nth || nth < 1) return null;
+    const total = typeof pos.total === 'number' ? pos.total : null;
+    return {
+      nthOfType: nth,
+      total,
+      index: typeof pos.index === 'number' ? pos.index : null,
+      tag: source && source.tag ? String(source.tag).toLowerCase() : (target && target.tag ? String(target.tag).toLowerCase() : null),
+      repeats: source && typeof source.repeats === 'boolean'
+        ? source.repeats
+        : (typeof total === 'number' ? total > 1 : false)
+    };
+  };
+
+  const direct = target && target.position ? extractFromPosition(target.position, target) : null;
+  if (direct) return direct;
+
+  const targetDomContext = target && target.domContext && target.domContext.self ? target.domContext.self : null;
+  const contextSelf = event.domContext && event.domContext.self ? event.domContext.self : null;
+  const fallbackSelf = targetDomContext || contextSelf || null;
+  if (fallbackSelf && fallbackSelf.position) {
+    return extractFromPosition(fallbackSelf.position, fallbackSelf);
+  }
+
+  return null;
+}
+
+function selectorLikelyStable(selector) {
+  if (!selector || typeof selector !== 'string') return false;
+  // id, data-* 속성, aria-* 속성 등이 포함되면 충분히 안정적인 것으로 판단
+  if (/#/.test(selector)) return true;
+  if (/\[data-[^\]=]+=['"][^'"]+['"]/.test(selector)) return true;
+  if (/\[aria-[^\]=]+=['"][^'"]+['"]/.test(selector)) return true;
+  if (/\[id=['"][^'"]+['"]/.test(selector)) return true;
+  return false;
+}
+
+function appendNthToSelector(selector, nth) {
+  if (!selector || typeof selector !== 'string') return null;
+  const trimmed = selector.trim();
+  if (!trimmed || /:nth-(child|of-type)\(/i.test(trimmed)) return null;
+  const match = trimmed.match(/([^\s>+~]+)$/);
+  if (!match) return null;
+  const lastPart = match[1];
+  const pseudoIndex = lastPart.indexOf(':');
+  const basePart = pseudoIndex >= 0 ? lastPart.slice(0, pseudoIndex) : lastPart;
+  const pseudoPart = pseudoIndex >= 0 ? lastPart.slice(pseudoIndex) : '';
+  const newLastPart = `${basePart}:nth-of-type(${nth})${pseudoPart}`;
+  const prefix = match.index ? trimmed.slice(0, match.index) : '';
+  return `${prefix}${newLastPart}`;
+}
+
+function enforceNthSelectorIfNeeded(candidate, event) {
+  if (!candidate || !event) return candidate;
+  const type = candidate.type || inferSelectorType(candidate.selector);
+  if (!type || type === 'xpath' || type === 'xpath-full' || type === 'text') {
+    return candidate;
+  }
+  const positionInfo = getTargetPositionInfo(event);
+  if (!positionInfo) return candidate;
+  const matchCount = typeof candidate.matchCount === 'number' ? candidate.matchCount : null;
+  const repeated = positionInfo.repeats === true || (typeof positionInfo.total === 'number' && positionInfo.total > 1);
+  const needsNth =
+    (matchCount !== null && matchCount > 1) ||
+    candidate.unique === false ||
+    (!selectorLikelyStable(candidate.selector) && repeated);
+  if (!needsNth) return candidate;
+  const appended = appendNthToSelector(candidate.selector, positionInfo.nthOfType);
+  if (!appended) return candidate;
+  const reasonParts = (candidate.reason ? candidate.reason.split(' • ') : []).filter(Boolean);
+  const nthLabel = `nth-of-type(${positionInfo.nthOfType}) 적용`;
+  if (!reasonParts.includes(nthLabel)) {
+    reasonParts.push(nthLabel);
+  }
+  return {
+    ...candidate,
+    selector: appended,
+    reason: reasonParts.join(' • '),
+    unique: true,
+    matchCount: 1
+  };
 }
 
 function applySelector(s, eventIndex, source = 'base', listIndex = -1) {
@@ -1843,47 +2414,54 @@ function applySelector(s, eventIndex, source = 'base', listIndex = -1) {
     const evs = res.events || [];
     if (targetIndex >= 0 && targetIndex < evs.length) {
       const targetEvent = evs[targetIndex];
-      const selectorType = s.type || inferSelectorType(s.selector);
+      let candidateToApply = enforceNthSelectorIfNeeded({ ...s }, targetEvent) || { ...s };
+      const selectorType = candidateToApply.type || inferSelectorType(candidateToApply.selector);
 
       if (source === 'ai') {
         if (!Array.isArray(targetEvent.aiSelectorCandidates)) {
           targetEvent.aiSelectorCandidates = [];
         }
         if (listIndex >= 0 && listIndex < targetEvent.aiSelectorCandidates.length) {
-          targetEvent.aiSelectorCandidates[listIndex] = { ...targetEvent.aiSelectorCandidates[listIndex], ...s };
+          targetEvent.aiSelectorCandidates[listIndex] = {
+            ...targetEvent.aiSelectorCandidates[listIndex],
+            ...candidateToApply
+          };
         } else if (listIndex === -1) {
-          targetEvent.aiSelectorCandidates.push({ ...s });
+          targetEvent.aiSelectorCandidates.push({ ...candidateToApply });
         }
       } else if (Array.isArray(targetEvent.selectorCandidates) && listIndex >= 0 && listIndex < targetEvent.selectorCandidates.length) {
-        targetEvent.selectorCandidates[listIndex] = { ...targetEvent.selectorCandidates[listIndex], ...s };
+        targetEvent.selectorCandidates[listIndex] = {
+          ...targetEvent.selectorCandidates[listIndex],
+          ...candidateToApply
+        };
       }
 
-      targetEvent.primarySelector = s.selector;
+      targetEvent.primarySelector = candidateToApply.selector;
       targetEvent.primarySelectorType = selectorType;
       if (selectorType === 'text') {
-        targetEvent.primarySelectorMatchMode = s.matchMode || 'exact';
+        targetEvent.primarySelectorMatchMode = candidateToApply.matchMode || 'exact';
       } else {
         delete targetEvent.primarySelectorMatchMode;
       }
-      if (selectorType === 'text' && s.textValue) {
-        targetEvent.primarySelectorText = s.textValue;
+      if (selectorType === 'text' && candidateToApply.textValue) {
+        targetEvent.primarySelectorText = candidateToApply.textValue;
       } else {
         delete targetEvent.primarySelectorText;
       }
-      if (selectorType === 'xpath' && s.xpathValue) {
-        targetEvent.primarySelectorXPath = s.xpathValue;
+      if (selectorType === 'xpath' && (candidateToApply.xpathValue || s.xpathValue)) {
+        targetEvent.primarySelectorXPath = candidateToApply.xpathValue || s.xpathValue;
       } else if (selectorType !== 'xpath') {
         delete targetEvent.primarySelectorXPath;
       }
 
       chrome.storage.local.set({events: evs}, () => {
         if (allEvents[targetIndex]) {
-          allEvents[targetIndex].primarySelector = s.selector;
+          allEvents[targetIndex].primarySelector = candidateToApply.selector;
           allEvents[targetIndex].primarySelectorType = selectorType;
           if (selectorType === 'text') {
             allEvents[targetIndex].primarySelectorMatchMode = targetEvent.primarySelectorMatchMode;
-            if (s.textValue) {
-              allEvents[targetIndex].primarySelectorText = s.textValue;
+            if (candidateToApply.textValue) {
+              allEvents[targetIndex].primarySelectorText = candidateToApply.textValue;
             } else {
               delete allEvents[targetIndex].primarySelectorText;
             }
@@ -1891,8 +2469,8 @@ function applySelector(s, eventIndex, source = 'base', listIndex = -1) {
             delete allEvents[targetIndex].primarySelectorMatchMode;
             delete allEvents[targetIndex].primarySelectorText;
           }
-          if (selectorType === 'xpath' && s.xpathValue) {
-            allEvents[targetIndex].primarySelectorXPath = s.xpathValue;
+          if (selectorType === 'xpath' && (candidateToApply.xpathValue || s.xpathValue)) {
+            allEvents[targetIndex].primarySelectorXPath = candidateToApply.xpathValue || s.xpathValue;
           } else if (selectorType !== 'xpath') {
             delete allEvents[targetIndex].primarySelectorXPath;
           }
@@ -1904,7 +2482,7 @@ function applySelector(s, eventIndex, source = 'base', listIndex = -1) {
         }
         const timelineItem = document.querySelector(`[data-event-index="${targetIndex}"]`);
         if (timelineItem) {
-          const usedSelector = s.selector;
+          const usedSelector = candidateToApply.selector;
           timelineItem.textContent = new Date(targetEvent.timestamp).toLocaleTimeString() + ' - ' + targetEvent.action + ' - ' + usedSelector;
         }
         if (currentEventIndex === targetIndex && allEvents[targetIndex]) {

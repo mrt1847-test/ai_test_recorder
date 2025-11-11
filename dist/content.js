@@ -733,9 +733,6 @@
         continue;
       }
       const ancestorSelectors = [];
-      if (current.id) {
-        ancestorSelectors.push(`#${cssEscapeIdent(current.id)}`);
-      }
       const classList = Array.from(current.classList || []).filter(Boolean);
       if (classList.length) {
         const combos = buildClassCombinationLists(classList, {
@@ -889,6 +886,15 @@
     const candidate = { ...baseCandidate };
     const originalType = candidate.type || inferSelectorType(candidate.selector);
     const resolvedType = candidate.type || originalType;
+    if (candidate.rawSelector === void 0) {
+      candidate.rawSelector = baseCandidate.rawSelector || baseCandidate.selector;
+    }
+    if (candidate.rawType === void 0) {
+      candidate.rawType = baseCandidate.rawType || originalType;
+    }
+    if (candidate.rawReason === void 0 && baseCandidate.reason) {
+      candidate.rawReason = baseCandidate.rawReason || baseCandidate.reason;
+    }
     const parsed = parseSelectorForMatching(candidate.selector, resolvedType);
     let reasonParts = candidate.reason ? [candidate.reason] : [];
     if (!options.skipGlobalCheck) {
@@ -899,6 +905,10 @@
       const globalCount = countMatchesForSelector(parsed, document, matchOptions);
       candidate.matchCount = globalCount;
       candidate.unique = globalCount === 1;
+      if (candidate.rawMatchCount === void 0) {
+        candidate.rawMatchCount = globalCount;
+        candidate.rawUnique = globalCount === 1;
+      }
       if (globalCount === 0 && options.allowZero !== true) {
         return null;
       }
@@ -1032,6 +1042,21 @@
         const key = `${type || ""}::${candidate.selector}`;
         if (seen.has(key)) return;
         seen.add(key);
+        if (candidate.rawSelector === void 0) {
+          candidate.rawSelector = candidate.selector;
+        }
+        if (candidate.rawType === void 0) {
+          candidate.rawType = type;
+        }
+        if (candidate.rawMatchCount === void 0 && typeof candidate.matchCount === "number") {
+          candidate.rawMatchCount = candidate.matchCount;
+        }
+        if (candidate.rawUnique === void 0 && typeof candidate.unique === "boolean") {
+          candidate.rawUnique = candidate.unique;
+        }
+        if (candidate.rawReason === void 0 && candidate.reason) {
+          candidate.rawReason = candidate.reason;
+        }
         results.push(candidate);
       },
       list() {
@@ -1125,7 +1150,11 @@
         textValue: truncatedText,
         matchMode: "exact",
         unique: textMatchCount === 1,
-        matchCount: textMatchCount
+        matchCount: textMatchCount,
+        rawSelector: textSelector,
+        rawType: "text",
+        rawMatchCount: textMatchCount,
+        rawUnique: textMatchCount === 1
       });
       const textCandidate = enrichCandidateWithUniqueness(
         { type: "text", selector: `text="${escapeAttributeValue(truncatedText)}"`, score: DEFAULT_TEXT_SCORE - 3, reason: "\uD14D\uC2A4\uD2B8 \uC870\uD569", textValue: truncatedText },
@@ -2210,6 +2239,7 @@
     const targetTag = target && target.tagName ? target.tagName : null;
     const selectorCandidates = Array.isArray(selectors) ? selectors : [];
     const primaryData = buildPrimarySelectorData(selectorCandidates);
+    const positionInfo = target ? getElementPositionInfo(target) : null;
     return {
       version: EVENT_SCHEMA_VERSION,
       timestamp,
@@ -2231,6 +2261,9 @@
         id: target.id || null,
         classes: target.classList ? Array.from(target.classList) : [],
         text: (target.innerText || target.textContent || "").trim().slice(0, 200),
+        childCount: target.children ? target.children.length : 0,
+        position: positionInfo,
+        repeats: positionInfo ? positionInfo.total > 1 : false,
         domContext
       } : null,
       clientRect,
@@ -2272,7 +2305,7 @@
     const iframeContext = getIframeContext(target);
     const clientRect = buildClientRect(target);
     const metadata = { domEvent: action };
-    const domContext = buildDomContextSnapshot(target);
+    const domContext = buildDomContextSnapshot(target, { includeSelf: true });
     const eventRecord = createEventRecord({
       action,
       value,

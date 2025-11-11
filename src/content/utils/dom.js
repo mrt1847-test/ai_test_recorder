@@ -422,7 +422,7 @@ function pickContextAttributes(element) {
   return attrs;
 }
 
-function getElementPositionInfo(element) {
+export function getElementPositionInfo(element) {
   const parent = element.parentElement;
   let index = 0;
   let nthOfType = 0;

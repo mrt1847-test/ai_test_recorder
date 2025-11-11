@@ -73,7 +73,10 @@
   <div id="main">
     <div id="main-top">
       <div id="timeline-panel">
-        <h4>Timeline</h4>
+        <div class="panel-header">
+          <h4>Timeline</h4>
+          <button id="delete-event-btn" class="panel-mini-btn" disabled>선택 삭제</button>
+        </div>
         <div id="timeline"></div>
       </div>
       <div id="selector-column">
@@ -128,7 +131,7 @@
           <span id="ai-review-status" class="code-review-status"></span>
         </div>
       </div>
-      <div id="code-editor" class="code-editor">
+      <div id="code-editor">
         <textarea id="code-output" spellcheck="false" wrap="off"></textarea>
       </div>
       <div id="code-review-summary" class="code-review-summary hidden"></div>

@@ -2,7 +2,7 @@
  * 녹화 이벤트 레코드의 공통 스키마를 정의한다.
  * DOM 컨텍스트와 기본 셀렉터 정보를 함께 캡처한다.
  */
-import { inferSelectorType } from '../utils/dom.js';
+import { inferSelectorType, getElementPositionInfo } from '../utils/dom.js';
 
 export const EVENT_SCHEMA_VERSION = 2;
 
@@ -43,6 +43,7 @@ export function createEventRecord({
   const selectorCandidates = Array.isArray(selectors) ? selectors : [];
   // 첫 번째 후보를 기반으로 primary selector 세부 정보를 준비.
   const primaryData = buildPrimarySelectorData(selectorCandidates);
+  const positionInfo = target ? getElementPositionInfo(target) : null;
 
   return {
     version: EVENT_SCHEMA_VERSION,
@@ -66,6 +67,9 @@ export function createEventRecord({
           id: target.id || null,
           classes: target.classList ? Array.from(target.classList) : [],
           text: (target.innerText || target.textContent || '').trim().slice(0, 200),
+          childCount: target.children ? target.children.length : 0,
+          position: positionInfo,
+          repeats: positionInfo ? positionInfo.total > 1 : false,
           domContext: domContext
         }
       : null,

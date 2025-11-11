@@ -49,7 +49,7 @@ function buildEventForTarget({ action, target, value = null }) {
   const iframeContext = getIframeContext(target);
   const clientRect = buildClientRect(target);
   const metadata = { domEvent: action };
-  const domContext = buildDomContextSnapshot(target);
+  const domContext = buildDomContextSnapshot(target, { includeSelf: true });
   const eventRecord = createEventRecord({
     action,
     value,

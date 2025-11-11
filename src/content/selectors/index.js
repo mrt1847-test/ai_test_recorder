@@ -364,10 +364,10 @@ function tryBuildAncestorCssSelector(element, baseSelector, contextElement) {
       continue;
     }
     const ancestorSelectors = [];
-    if (current.id) {
-      // 고유 id가 있으면 최우선으로 고려.
-      ancestorSelectors.push(`#${cssEscapeIdent(current.id)}`);
-    }
+    // if (current.id) {
+    //   // 고유 id가 있으면 최우선으로 고려.
+    //   ancestorSelectors.push(`#${cssEscapeIdent(current.id)}`);
+    // }
     const classList = Array.from(current.classList || []).filter(Boolean);
     if (classList.length) {
       const combos = buildClassCombinationLists(classList, {
@@ -548,6 +548,15 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
   const candidate = { ...baseCandidate };
   const originalType = candidate.type || inferSelectorType(candidate.selector);
   const resolvedType = candidate.type || originalType;
+  if (candidate.rawSelector === undefined) {
+    candidate.rawSelector = baseCandidate.rawSelector || baseCandidate.selector;
+  }
+  if (candidate.rawType === undefined) {
+    candidate.rawType = baseCandidate.rawType || originalType;
+  }
+  if (candidate.rawReason === undefined && baseCandidate.reason) {
+    candidate.rawReason = baseCandidate.rawReason || baseCandidate.reason;
+  }
   const parsed = parseSelectorForMatching(candidate.selector, resolvedType);
   let reasonParts = candidate.reason ? [candidate.reason] : [];
 
@@ -562,6 +571,10 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
     const globalCount = countMatchesForSelector(parsed, document, matchOptions);
     candidate.matchCount = globalCount;
     candidate.unique = globalCount === 1;
+    if (candidate.rawMatchCount === undefined) {
+      candidate.rawMatchCount = globalCount;
+      candidate.rawUnique = globalCount === 1;
+    }
     // 유일하지 않은데 허용되지 않으면 후보를 버린다.
     if (globalCount === 0 && options.allowZero !== true) {
       return null;
@@ -711,6 +724,21 @@ function createCandidateRegistry() {
       const key = `${type || ''}::${candidate.selector}`;
       if (seen.has(key)) return;
       seen.add(key);
+      if (candidate.rawSelector === undefined) {
+        candidate.rawSelector = candidate.selector;
+      }
+      if (candidate.rawType === undefined) {
+        candidate.rawType = type;
+      }
+      if (candidate.rawMatchCount === undefined && typeof candidate.matchCount === 'number') {
+        candidate.rawMatchCount = candidate.matchCount;
+      }
+      if (candidate.rawUnique === undefined && typeof candidate.unique === 'boolean') {
+        candidate.rawUnique = candidate.unique;
+      }
+      if (candidate.rawReason === undefined && candidate.reason) {
+        candidate.rawReason = candidate.reason;
+      }
       results.push(candidate);
     },
     list() {
@@ -830,7 +858,11 @@ export function getSelectorCandidates(element) {
       textValue: truncatedText,
       matchMode: 'exact',
       unique: textMatchCount === 1,
-      matchCount: textMatchCount
+      matchCount: textMatchCount,
+      rawSelector: textSelector,
+      rawType: 'text',
+      rawMatchCount: textMatchCount,
+      rawUnique: textMatchCount === 1
     });
     
     // 2. 기존 로직: 유일성 검증 + 조합 셀렉터 생성
