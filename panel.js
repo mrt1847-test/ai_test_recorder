@@ -4149,9 +4149,23 @@ function buildPlaywrightPythonAction(ev, selectorInfo, base = 'page') {
   const value = escapeForPythonString(ev.value || '');
   
   if (ev.action === 'click') {
+    if (selectorInfo.type === 'text' && typeof selectorInfo.matchCount === 'number' && selectorInfo.matchCount > 1) {
+      const positionInfo = getTargetPositionInfo(ev);
+      if (positionInfo && positionInfo.nthOfType) {
+        const index = positionInfo.nthOfType - 1;
+        return `${locatorExpr}.nth(${index}).click()`;
+      }
+    }
     return `${locatorExpr}.click()`;
   }
   if (ev.action === 'input') {
+    if (selectorInfo.type === 'text' && typeof selectorInfo.matchCount === 'number' && selectorInfo.matchCount > 1) {
+      const positionInfo = getTargetPositionInfo(ev);
+      if (positionInfo && positionInfo.nthOfType) {
+        const index = positionInfo.nthOfType - 1;
+        return `${locatorExpr}.nth(${index}).fill("${value}")`;
+      }
+    }
     return `${locatorExpr}.fill("${value}")`;
   }
   return null;
@@ -4163,9 +4177,23 @@ function buildPlaywrightJSAction(ev, selectorInfo, base = 'page') {
   const value = escapeForJSString(ev.value || '');
   
   if (ev.action === 'click') {
+    if (selectorInfo.type === 'text' && typeof selectorInfo.matchCount === 'number' && selectorInfo.matchCount > 1) {
+      const positionInfo = getTargetPositionInfo(ev);
+      if (positionInfo && positionInfo.nthOfType) {
+        const index = positionInfo.nthOfType - 1;
+        return `await ${locatorExpr}.nth(${index}).click();`;
+      }
+    }
     return `await ${locatorExpr}.click();`;
   }
   if (ev.action === 'input') {
+    if (selectorInfo.type === 'text' && typeof selectorInfo.matchCount === 'number' && selectorInfo.matchCount > 1) {
+      const positionInfo = getTargetPositionInfo(ev);
+      if (positionInfo && positionInfo.nthOfType) {
+        const index = positionInfo.nthOfType - 1;
+        return `await ${locatorExpr}.nth(${index}).fill("${value}");`;
+      }
+    }
     return `await ${locatorExpr}.fill("${value}");`;
   }
   return null;
@@ -4188,9 +4216,15 @@ function buildSeleniumPythonAction(ev, selectorInfo, driverVar = 'driver') {
     const textVal = getTextValue(selectorInfo);
     if (textVal) {
       const matchMode = selectorInfo.matchMode || 'exact';
-      const expr = matchMode === 'exact'
+      let expr = matchMode === 'exact'
         ? `//*[normalize-space(.) = "${textVal}"]`
         : `//*[contains(normalize-space(.), "${textVal}")]`;
+      if (typeof selectorInfo.matchCount === 'number' && selectorInfo.matchCount > 1) {
+        const positionInfo = getTargetPositionInfo(ev);
+        if (positionInfo && positionInfo.nthOfType) {
+          expr = `(${expr})[${positionInfo.nthOfType}]`;
+        }
+      }
       const escapedExpr = escapeForPythonString(expr);
       if (ev.action === 'click') {
         return `${driverVar}.find_element(By.XPATH, "${escapedExpr}").click()`;
@@ -4227,9 +4261,15 @@ function buildSeleniumJSAction(ev, selectorInfo) {
     const textVal = getTextValue(selectorInfo);
     if (textVal) {
       const matchMode = selectorInfo.matchMode || 'exact';
-      const expr = matchMode === 'exact'
+      let expr = matchMode === 'exact'
         ? `//*[normalize-space(.) = "${textVal}"]`
         : `//*[contains(normalize-space(.), "${textVal}")]`;
+      if (typeof selectorInfo.matchCount === 'number' && selectorInfo.matchCount > 1) {
+        const positionInfo = getTargetPositionInfo(ev);
+        if (positionInfo && positionInfo.nthOfType) {
+          expr = `(${expr})[${positionInfo.nthOfType}]`;
+        }
+      }
       const escapedExpr = escapeForJSString(expr);
       if (ev.action === 'click') {
         return `  await driver.findElement(By.xpath("${escapedExpr}")).click();`;
