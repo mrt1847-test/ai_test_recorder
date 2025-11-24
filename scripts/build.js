@@ -21,6 +21,8 @@ function copyStaticAssets() {
     'devtools.js',
     'panel.html',
     'panel.js',
+    'popup.html',
+    'popup.js',
     'style.css'
   ];
 

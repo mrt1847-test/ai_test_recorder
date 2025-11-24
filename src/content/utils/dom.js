@@ -314,6 +314,39 @@ export function iterateElements(scope, callback) {
   }
 }
 
+function isElementVisibleForMatching(element) {
+  if (!element || element.nodeType !== 1) return false;
+  if (element.hidden) return false;
+  const doc = element.ownerDocument || document;
+  const view = (doc && doc.defaultView) || window;
+  let computedStyle = null;
+  try {
+    computedStyle = view.getComputedStyle(element);
+  } catch (err) {
+    computedStyle = null;
+  }
+  if (computedStyle) {
+    const opacity = parseFloat(computedStyle.opacity);
+    if (!Number.isNaN(opacity) && opacity === 0) return false;
+  }
+  const rect = element.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) {
+    return false;
+  }
+  return true;
+}
+
+function isNodeVisibleForMatching(node) {
+  if (!node) return false;
+  if (node.nodeType === 1) {
+    return isElementVisibleForMatching(node);
+  }
+  if (node.nodeType === 3 && node.parentElement) {
+    return isElementVisibleForMatching(node.parentElement);
+  }
+  return false;
+}
+
 export function buildTextXPathExpression(text, matchMode, scopeIsDocument) {
   const literal = escapeXPathLiteral(text);
   const base = scopeIsDocument ? '//' : './/';
@@ -321,6 +354,29 @@ export function buildTextXPathExpression(text, matchMode, scopeIsDocument) {
     return `${base}*[normalize-space(.) = ${literal}]`;
   }
   return `${base}*[contains(normalize-space(.), ${literal})]`;
+}
+
+function dedupeTextMatchNodes(nodes) {
+  if (!Array.isArray(nodes) || nodes.length <= 1) return nodes || [];
+  const nodeSet = new Set(nodes);
+  const result = [];
+  nodes.forEach((node) => {
+    if (!node) return;
+    const text = normalizeText(node.textContent || '');
+    if (!text) return;
+    let ancestor = node.parentElement;
+    while (ancestor) {
+      if (nodeSet.has(ancestor)) {
+        const ancestorText = normalizeText(ancestor.textContent || '');
+        if (ancestorText === text) {
+          return;
+        }
+      }
+      ancestor = ancestor.parentElement;
+    }
+    result.push(node);
+  });
+  return result;
 }
 
 export function countMatchesForSelector(parsed, root, options = {}) {
@@ -337,9 +393,11 @@ export function countMatchesForSelector(parsed, root, options = {}) {
       let node = iterator.iterateNext();
       // XPath 결과를 하나씩 순회하면서 개수를 센다.
       while (node) {
-        count += 1;
-        if (shouldClamp && count >= maxCount) {
-          return maxCount;
+        if (isNodeVisibleForMatching(node)) {
+          count += 1;
+          if (shouldClamp && count >= maxCount) {
+            return maxCount;
+          }
         }
         node = iterator.iterateNext();
       }
@@ -354,38 +412,40 @@ export function countMatchesForSelector(parsed, root, options = {}) {
       const matchMode = options.matchMode === 'contains' ? 'contains' : 'exact';
       const expression = buildTextXPathExpression(targetText, matchMode, isDocumentScope);
       const iterator = doc.evaluate(expression, contextNode, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
-      let count = 0;
+      const matches = [];
       let node = iterator.iterateNext();
       // 텍스트 기반 XPath도 동일하게 반복하며 개수를 계산.
       while (node) {
-        count += 1;
-        if (shouldClamp && count >= maxCount) {
-          return maxCount;
+        if (isNodeVisibleForMatching(node)) {
+          matches.push(node);
         }
         node = iterator.iterateNext();
       }
-      return count;
+      const deduped = dedupeTextMatchNodes(matches);
+      if (!shouldClamp) return deduped.length;
+      return Math.min(deduped.length, maxCount);
     }
     const result = scope.querySelectorAll(parsed.value);
+    const filtered = Array.from(result).filter((node) => isNodeVisibleForMatching(node));
     if (!shouldClamp) {
       if (scope === document) {
-        return result.length;
+        return filtered.length;
       }
-      let count = result.length;
+      let count = filtered.length;
       // 스코프 자체도 셀렉터와 일치하면 추가로 카운트.
-      if (scope.matches && scope.matches(parsed.value)) {
+      if (scope.matches && scope.matches(parsed.value) && isNodeVisibleForMatching(scope)) {
         count += 1;
       }
       return count;
     }
     let count = 0;
-    for (let i = 0; i < result.length; i += 1) {
+    for (let i = 0; i < filtered.length; i += 1) {
       count += 1;
       if (count >= maxCount) {
         return maxCount;
       }
     }
-    if (scope !== document && scope.matches && scope.matches(parsed.value)) {
+    if (scope !== document && scope.matches && scope.matches(parsed.value) && isNodeVisibleForMatching(scope)) {
       count += 1;
       if (count >= maxCount) {
         return maxCount;
@@ -447,6 +507,7 @@ export function getElementPositionInfo(element) {
 
 function summarizeElementForContext(element) {
   if (!element || element.nodeType !== 1) return null;
+  if (!isElementVisibleForMatching(element)) return null;
   const summary = {
     tag: element.tagName ? element.tagName.toLowerCase() : ''
   };
@@ -465,49 +526,100 @@ function summarizeElementForContext(element) {
   if (rawText) {
     summary.text = rawText.length > 80 ? `${rawText.slice(0, 77)}…` : rawText;
   }
+  if (typeof element.value === 'string' && element.value.trim()) {
+    summary.value = element.value.trim();
+  } else if (element.hasAttribute && element.hasAttribute('value')) {
+    const attrValue = element.getAttribute('value');
+    if (attrValue) {
+      summary.value = attrValue;
+    }
+  }
   summary.childCount = element.children ? element.children.length : 0;
   summary.position = getElementPositionInfo(element);
+  if (summary.position && typeof summary.position.total === 'number') {
+    summary.repeats = summary.position.total > 1;
+  }
   return summary;
 }
 
 export function buildDomContextSnapshot(element, options = {}) {
   if (!element || element.nodeType !== 1) {
     return {
+      self: null,
       ancestors: [],
-      children: []
+      siblings: [],
+      children: [],
+      root: null
     };
   }
   const {
-    maxAncestors = 4,
-    maxChildren = 6,
-    includeSelf = false
+    maxParents = 3,
+    maxSiblings = 5,
+    minSiblings = 2,
+    maxChildren = 5,
+    includeSelf = true,
+    includeRoot = true
   } = options;
 
-  const ancestors = [];
+  const ancestorSummaries = [];
   let current = element.parentElement;
-  // 최대 maxAncestors개까지 상위 요소를 요약한다.
-  while (current && ancestors.length < maxAncestors) {
+  while (current) {
     const summary = summarizeElementForContext(current);
     if (summary) {
-      ancestors.push(summary);
+      ancestorSummaries.push(summary);
     }
     current = current.parentElement;
   }
 
+  const parentSummaries = ancestorSummaries.slice(0, maxParents);
+  const rootSummary = includeRoot && ancestorSummaries.length > maxParents
+    ? ancestorSummaries[ancestorSummaries.length - 1]
+    : null;
+
+  const siblings = [];
+  const parentElement = element.parentElement;
+  if (parentElement) {
+    const siblingElements = Array.from(parentElement.children || [])
+      .filter((child) => child !== element);
+    const decorated = siblingElements
+      .map((sibling, idx) => ({
+        element: sibling,
+        index: idx,
+        summary: summarizeElementForContext(sibling)
+      }))
+      .filter((item) => item.summary);
+
+    const targetIndex = parentElement ? Array.from(parentElement.children || []).indexOf(element) : -1;
+    const desiredCount = Math.max(maxSiblings, minSiblings);
+
+    decorated.sort((a, b) => {
+      const distanceA = targetIndex >= 0 ? Math.abs((a.index ?? 0) - targetIndex) : a.index ?? 0;
+      const distanceB = targetIndex >= 0 ? Math.abs((b.index ?? 0) - targetIndex) : b.index ?? 0;
+      if (distanceA !== distanceB) return distanceA - distanceB;
+      return (a.index ?? 0) - (b.index ?? 0);
+    });
+
+    const selected = decorated.slice(0, desiredCount);
+    selected.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    selected.forEach((item) => {
+      siblings.push(item.summary);
+    });
+  }
+
   const children = [];
   const childElements = Array.from(element.children || []);
-  // 최대 maxChildren개까지 자식 요소 요약을 작성한다.
-  childElements.slice(0, maxChildren).forEach((child) => {
+  for (const child of childElements) {
+    if (children.length >= maxChildren) break;
     const summary = summarizeElementForContext(child);
-    if (summary) {
-      children.push(summary);
-    }
-  });
+    if (summary) children.push(summary);
+  }
 
   return {
     self: includeSelf ? summarizeElementForContext(element) : undefined,
-    ancestors,
-    children
+    ancestors: parentSummaries,
+    siblings,
+    children,
+    root: rootSummary
   };
 }
 

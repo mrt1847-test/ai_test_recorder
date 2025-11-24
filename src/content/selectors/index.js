@@ -540,14 +540,7 @@ export function getIframeContext(target) {
   }
 }
 
-/**
- * 후보 셀렉터의 유일성 검사를 수행하고 필요한 경우 보정한다.
- */
-function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
-  if (!baseCandidate || !baseCandidate.selector) return null;
-  const candidate = { ...baseCandidate };
-  const originalType = candidate.type || inferSelectorType(candidate.selector);
-  const resolvedType = candidate.type || originalType;
+function ensureRawMetadata(candidate, baseCandidate, originalType) {
   if (candidate.rawSelector === undefined) {
     candidate.rawSelector = baseCandidate.rawSelector || baseCandidate.selector;
   }
@@ -557,147 +550,222 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
   if (candidate.rawReason === undefined && baseCandidate.reason) {
     candidate.rawReason = baseCandidate.rawReason || baseCandidate.reason;
   }
-  const parsed = parseSelectorForMatching(candidate.selector, resolvedType);
-  let reasonParts = candidate.reason ? [candidate.reason] : [];
+}
 
-  if (!options.skipGlobalCheck) {
+function createReasonContext(candidate) {
+  return {
+    reasonParts: candidate.reason ? [candidate.reason] : []
+  };
+}
+
+function applyGlobalMatchCheck(candidate, parsed, options, ctx) {
+  if (options.skipGlobalCheck) return true;
+
   const matchOptions = {
     matchMode: candidate.matchMode,
     maxCount: typeof options.maxMatchSample === 'number' && options.maxMatchSample > 0
       ? options.maxMatchSample
       : 4
   };
-    // 문서 전체를 대상으로 매칭 횟수를 계산한다.
-    const globalCount = countMatchesForSelector(parsed, document, matchOptions);
-    candidate.matchCount = globalCount;
-    candidate.unique = globalCount === 1;
-    if (candidate.rawMatchCount === undefined) {
-      candidate.rawMatchCount = globalCount;
-      candidate.rawUnique = globalCount === 1;
-    }
-    // 유일하지 않은데 허용되지 않으면 후보를 버린다.
-    if (globalCount === 0 && options.allowZero !== true) {
-      return null;
-    }
-    reasonParts = reasonParts.filter((part) => !/유일 일치|개 요소와 일치/.test(part));
-    if (globalCount === 1) {
-      reasonParts.push('유일 일치');
-    } else if (globalCount > 1) {
-      reasonParts.push(globalCount === 2 ? '2개 요소와 일치 (추가 조합)' : `${globalCount}개 요소와 일치`);
+
+  const globalCount = countMatchesForSelector(parsed, document, matchOptions);
+  candidate.matchCount = globalCount;
+  candidate.unique = globalCount === 1;
+  if (candidate.rawMatchCount === undefined) {
+    candidate.rawMatchCount = globalCount;
+    candidate.rawUnique = globalCount === 1;
+  }
+
+  if (globalCount === 0 && options.allowZero !== true) {
+    return false;
+  }
+
+  ctx.reasonParts = ctx.reasonParts.filter((part) => !/유일 일치|개 요소와 일치/.test(part));
+  if (globalCount === 1) {
+    ctx.reasonParts.push('유일 일치');
+  } else if (globalCount > 1) {
+    ctx.reasonParts.push(globalCount === 2 ? '2개 요소와 일치 (추가 조합)' : `${globalCount}개 요소와 일치`);
+  }
+
+  return true;
+}
+
+function applyContextMatchCheck(candidate, parsed, options, ctx) {
+  if (!options.contextElement) return true;
+
+  const contextCount = countMatchesForSelector(parsed, options.contextElement, { matchMode: candidate.matchMode });
+  candidate.contextMatchCount = contextCount;
+  candidate.uniqueInContext = contextCount === 1;
+
+  if (options.contextLabel) {
+    if (contextCount === 1) {
+      ctx.reasonParts.push(`${options.contextLabel} 내 유일`);
+    } else if (contextCount > 1) {
+      ctx.reasonParts.push(`${options.contextLabel} 내 ${contextCount}개 일치`);
+    } else {
+      ctx.reasonParts.push(`${options.contextLabel} 내 일치 없음`);
     }
   }
 
-  if (options.contextElement) {
-    // 특정 컨텍스트 내에서의 매칭 개수를 별도로 계산한다.
-    const contextCount = countMatchesForSelector(parsed, options.contextElement, { matchMode: candidate.matchMode });
-    candidate.contextMatchCount = contextCount;
-    candidate.uniqueInContext = contextCount === 1;
-    if (options.contextLabel) {
-      if (contextCount === 1) {
-        reasonParts.push(`${options.contextLabel} 내 유일`);
-      } else if (contextCount > 1) {
-        reasonParts.push(`${options.contextLabel} 내 ${contextCount}개 일치`);
-      } else {
-        reasonParts.push(`${options.contextLabel} 내 일치 없음`);
-      }
-    }
-    if (options.requireContextUnique && !candidate.uniqueInContext) {
-      return null;
-    }
-    if (options.skipGlobalCheck) {
-      // 전역 체크를 생략한 경우 컨텍스트 결과를 그대로 사용한다.
-      candidate.matchCount = contextCount;
-      candidate.unique = candidate.uniqueInContext;
-    }
+  if (options.requireContextUnique && !candidate.uniqueInContext) {
+    return false;
+  }
+
+  if (options.skipGlobalCheck) {
+    candidate.matchCount = contextCount;
+    candidate.unique = candidate.uniqueInContext;
+  }
+
+  return true;
+}
+
+function clampDuplicateScore(candidate, options) {
+  if (typeof candidate.score !== 'number') return;
+  candidate.score = Math.min(candidate.score, options.duplicateScore ?? 55);
+  candidate.score = Math.min(candidate.score, options.duplicateScore ?? 60);
+}
+
+function maybeDeriveTextSelector(candidate, originalType, options, parsed, ctx) {
+  if (candidate.unique) return;
+  if (originalType !== 'text') return;
+  if (!options.element) return;
+  const textValue = candidate.textValue || parsed.value;
+  if (!textValue) return;
+
+  const ancestorResult = tryBuildAncestorTextXPath(
+    options.element,
+    textValue,
+    candidate.matchMode || 'exact'
+  );
+
+  if (!ancestorResult) return;
+
+  candidate.selector = ancestorResult.selector;
+  candidate.type = 'xpath';
+  candidate.relation = candidate.relation || 'global';
+  if (ancestorResult.reason) {
+    ctx.reasonParts.push(ancestorResult.reason);
+  } else {
+    ctx.reasonParts.push('텍스트 조합');
+  }
+}
+
+function maybeDeriveCssSelector(candidate, options, ctx) {
+  if (candidate.unique) return;
+  if (!options.element) return;
+
+  const baseCssSelector = extractCssSelector(candidate);
+  if (!baseCssSelector) return;
+
+  const simpleDerived = tryBuildSimpleAncestorCss(options.element, baseCssSelector, options.contextElement);
+  if (simpleDerived) {
+    candidate.selector = simpleDerived.selector;
+    candidate.type = 'css';
+    candidate.relation = options.contextElement ? 'relative' : candidate.relation || 'global';
+    ctx.reasonParts.push('부모 태그 경로 조합');
+    return;
+  }
+
+  const derived = tryBuildAncestorCssSelector(options.element, baseCssSelector, options.contextElement);
+  if (derived) {
+    candidate.selector = derived.selector;
+    candidate.type = 'css';
+    candidate.relation = options.contextElement ? 'relative' : candidate.relation || 'global';
+    ctx.reasonParts.push('상위 class 경로 조합');
+  }
+}
+
+function maybeApplyIndexing(candidate, originalType, options, ctx) {
+  if (candidate.unique) return;
+  if (originalType === 'text' || originalType === 'xpath') return;
+  if (!options.element) return;
+  if (options.enableIndexing === false) return;
+
+  const contextEl = options.contextElement && candidate.relation === 'relative'
+    ? options.contextElement
+    : null;
+  const uniqueSelector = buildUniqueCssPath(options.element, contextEl);
+  if (!uniqueSelector || uniqueSelector === candidate.selector) return;
+
+  const uniqueParsed = parseSelectorForMatching(uniqueSelector, 'css');
+  const count = countMatchesForSelector(uniqueParsed, contextEl || document, {
+    matchMode: candidate.matchMode,
+    maxCount: 2
+  });
+
+  if (count !== 1) return;
+
+  candidate.selector = uniqueSelector;
+  candidate.type = 'css';
+  candidate.relation = contextEl ? 'relative' : candidate.relation;
+  ctx.reasonParts.push('경로 인덱싱 적용');
+}
+
+function finalizeUniqueness(candidate, options, ctx) {
+  if (candidate.unique) return;
+
+  const verificationParsed = parseSelectorForMatching(
+    candidate.selector,
+    candidate.type || inferSelectorType(candidate.selector)
+  );
+  const verificationCount = countMatchesForSelector(
+    verificationParsed,
+    options.contextElement || document,
+    { matchMode: candidate.matchMode, maxCount: 4 }
+  );
+
+  candidate.matchCount = verificationCount;
+  candidate.unique = verificationCount === 1;
+  candidate.uniqueInContext = verificationCount === 1;
+
+  ctx.reasonParts = ctx.reasonParts.filter((part) => !/유일 일치|개 요소와 일치/.test(part));
+  if (verificationCount === 1) {
+    ctx.reasonParts.push('유일 일치');
+  } else if (verificationCount === 2) {
+    ctx.reasonParts.push('2개 요소와 일치 (추가 조합)');
+  } else if (verificationCount > 2) {
+    ctx.reasonParts.push(`${verificationCount}개 요소와 일치`);
+  }
+}
+
+/**
+ * 후보 셀렉터의 유일성 검사를 수행하고 필요한 경우 보정한다.
+ */
+function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
+  if (!baseCandidate || !baseCandidate.selector) return null;
+
+  const candidate = { ...baseCandidate };
+  const originalType = candidate.type || inferSelectorType(candidate.selector);
+  const resolvedType = candidate.type || originalType;
+
+  ensureRawMetadata(candidate, baseCandidate, originalType);
+
+  const parsed = parseSelectorForMatching(candidate.selector, resolvedType);
+  const ctx = createReasonContext(candidate);
+
+  if (!applyGlobalMatchCheck(candidate, parsed, options, ctx)) {
+    return null;
+  }
+
+  if (!applyContextMatchCheck(candidate, parsed, options, ctx)) {
+    return null;
   }
 
   if (!options.skipGlobalCheck && options.requireUnique && candidate.unique === false) {
     return null;
   }
 
-  if (!options.skipGlobalCheck && candidate.unique === false && typeof candidate.score === 'number') {
-    candidate.score = Math.min(candidate.score, options.duplicateScore ?? 55);
+  if (!options.skipGlobalCheck && candidate.unique === false) {
+    clampDuplicateScore(candidate, options);
   }
 
-  if (!options.skipGlobalCheck && candidate.unique === false && typeof candidate.score === 'number') {
-    candidate.score = Math.min(candidate.score, options.duplicateScore ?? 60);
-  }
+  maybeDeriveTextSelector(candidate, originalType, options, parsed, ctx);
+  maybeDeriveCssSelector(candidate, options, ctx);
+  maybeApplyIndexing(candidate, originalType, options, ctx);
+  finalizeUniqueness(candidate, options, ctx);
 
-  if (!candidate.unique && originalType === 'text' && options.element && (candidate.textValue || parsed.value)) {
-    const ancestorResult = tryBuildAncestorTextXPath(
-      options.element,
-      candidate.textValue || parsed.value,
-      candidate.matchMode || 'exact'
-    );
-    if (ancestorResult) {
-      candidate.selector = ancestorResult.selector;
-      candidate.type = 'xpath';
-      candidate.relation = candidate.relation || 'global';
-      if (ancestorResult.reason) {
-        reasonParts.push(ancestorResult.reason);
-      } else {
-        reasonParts.push('텍스트 조합');
-      }
-    }
-  }
+  candidate.reason = ctx.reasonParts.join(' • ');
 
-  if (!candidate.unique && options.element) {
-    const baseCssSelector = extractCssSelector(candidate);
-    if (baseCssSelector) {
-      const simpleDerived = tryBuildSimpleAncestorCss(options.element, baseCssSelector, options.contextElement);
-      if (simpleDerived) {
-        candidate.selector = simpleDerived.selector;
-        candidate.type = 'css';
-        candidate.relation = options.contextElement ? 'relative' : candidate.relation || 'global';
-        reasonParts.push('부모 태그 경로 조합');
-      } else {
-        const derived = tryBuildAncestorCssSelector(options.element, baseCssSelector, options.contextElement);
-        if (derived) {
-          candidate.selector = derived.selector;
-          candidate.type = 'css';
-          candidate.relation = options.contextElement ? 'relative' : candidate.relation || 'global';
-          reasonParts.push('상위 class 경로 조합');
-        }
-      }
-    }
-  }
-
-  if (originalType !== 'text' && originalType !== 'xpath' && !candidate.unique && options.element && options.enableIndexing !== false) {
-    const contextEl = options.contextElement && candidate.relation === 'relative' ? options.contextElement : null;
-    const uniqueSelector = buildUniqueCssPath(options.element, contextEl);
-    if (uniqueSelector && uniqueSelector !== candidate.selector) {
-      const uniqueParsed = parseSelectorForMatching(uniqueSelector, 'css');
-      const count = countMatchesForSelector(uniqueParsed, contextEl || document, { matchMode: candidate.matchMode, maxCount: 2 });
-      if (count === 1) {
-        candidate.selector = uniqueSelector;
-        candidate.type = 'css';
-        candidate.relation = contextEl ? 'relative' : candidate.relation;
-        reasonParts.push('경로 인덱싱 적용');
-      }
-    }
-  }
-
-  if (!candidate.unique) {
-    const verificationParsed = parseSelectorForMatching(candidate.selector, candidate.type || inferSelectorType(candidate.selector));
-    const verificationCount = countMatchesForSelector(
-      verificationParsed,
-      options.contextElement || document,
-      { matchMode: candidate.matchMode, maxCount: 4 }
-    );
-    candidate.matchCount = verificationCount;
-    candidate.unique = verificationCount === 1;
-    candidate.uniqueInContext = verificationCount === 1;
-    reasonParts = reasonParts.filter((part) => !/유일 일치|개 요소와 일치/.test(part));
-    if (verificationCount === 1) {
-      reasonParts.push('유일 일치');
-    } else if (verificationCount === 2) {
-      reasonParts.push('2개 요소와 일치 (추가 조합)');
-    } else if (verificationCount > 2) {
-      reasonParts.push(`${verificationCount}개 요소와 일치`);
-    }
-  }
-
-  candidate.reason = reasonParts.join(' • ');
   if (typeof candidate.score === 'number') {
     if (candidate.unique) {
       candidate.score = Math.min(100, Math.max(candidate.score + UNIQUE_MATCH_BONUS, 95));
@@ -708,7 +776,74 @@ function enrichCandidateWithUniqueness(baseCandidate, options = {}) {
       );
     }
   }
+
   return applyFragilityAdjustments(candidate);
+}
+
+function collectTextCandidates(element, registry) {
+  const rawText = (element.innerText || element.textContent || '')
+    .trim()
+    .split('\n')
+    .map((t) => t.trim())
+    .filter(Boolean)[0];
+
+  if (!rawText) return;
+
+  const truncatedText = rawText.slice(0, 60);
+  const escapedText = escapeAttributeValue(truncatedText);
+  const textSelector = `text="${escapedText}"`;
+  let textMatchCount = null;
+
+  try {
+    const parsed = parseSelectorForMatching(textSelector, 'text');
+    textMatchCount = countMatchesForSelector(parsed, document, { matchMode: 'exact', maxCount: 6 });
+  } catch (e) {
+    textMatchCount = null;
+  }
+
+  const reasonParts = ['텍스트 일치'];
+  if (typeof textMatchCount === 'number') {
+    if (textMatchCount === 1) {
+      reasonParts.push('1개 요소와 일치');
+    } else if (textMatchCount > 1) {
+      reasonParts.push(`${textMatchCount}개 요소와 일치`);
+    } else if (textMatchCount === 0) {
+      reasonParts.push('일치 없음');
+    }
+  } else {
+    reasonParts.push('일치 개수 계산 불가');
+  }
+
+  registry.add({
+    type: 'text',
+    selector: textSelector,
+    score: DEFAULT_TEXT_SCORE,
+    reason: reasonParts.filter(Boolean).join(' • '),
+    textValue: truncatedText,
+    matchMode: 'exact',
+    unique: textMatchCount === 1,
+    matchCount: textMatchCount,
+    rawSelector: textSelector,
+    rawType: 'text',
+    rawMatchCount: textMatchCount,
+    rawUnique: textMatchCount === 1
+  });
+
+  const textCandidate = enrichCandidateWithUniqueness(
+    {
+      type: 'text',
+      selector: `text="${escapedText}"`,
+      score: DEFAULT_TEXT_SCORE - 3,
+      reason: '텍스트 조합',
+      textValue: truncatedText
+    },
+    { duplicateScore: 55, element }
+  );
+
+  if (textCandidate) {
+    textCandidate.matchMode = textCandidate.matchMode || 'exact';
+    registry.add(textCandidate);
+  }
 }
 
 /**
@@ -827,54 +962,7 @@ export function getSelectorCandidates(element) {
     addCandidate(registry, cand, { duplicateScore: 58, element, maxMatchSample: 5 });
   });
 
-  const rawText = (element.innerText || element.textContent || '').trim().split('\n').map((t) => t.trim()).filter(Boolean)[0];
-  if (rawText) {
-    const truncatedText = rawText.slice(0, 60);
-    const textSelector = `text="${escapeAttributeValue(truncatedText)}"`;
-    let textMatchCount = null;
-    try {
-      const parsed = parseSelectorForMatching(textSelector, 'text');
-      textMatchCount = countMatchesForSelector(parsed, document, { matchMode: 'exact', maxCount: 6 });
-    } catch (e) {
-      textMatchCount = null;
-    }
-    const reasonParts = ['텍스트 일치'];
-    if (typeof textMatchCount === 'number') {
-      if (textMatchCount === 1) {
-        reasonParts.push('1개 요소와 일치');
-      } else if (textMatchCount > 1) {
-        reasonParts.push(`${textMatchCount}개 요소와 일치`);
-      } else if (textMatchCount === 0) {
-        reasonParts.push('일치 없음');
-      }
-    } else {
-      reasonParts.push('일치 개수 계산 불가');
-    }
-    registry.add({
-      type: 'text',
-      selector: textSelector,
-      score: DEFAULT_TEXT_SCORE,
-      reason: reasonParts.filter(Boolean).join(' • '),
-      textValue: truncatedText,
-      matchMode: 'exact',
-      unique: textMatchCount === 1,
-      matchCount: textMatchCount,
-      rawSelector: textSelector,
-      rawType: 'text',
-      rawMatchCount: textMatchCount,
-      rawUnique: textMatchCount === 1
-    });
-    
-    // 2. 기존 로직: 유일성 검증 + 조합 셀렉터 생성
-    const textCandidate = enrichCandidateWithUniqueness(
-      { type: 'text', selector: `text="${escapeAttributeValue(truncatedText)}"`, score: DEFAULT_TEXT_SCORE - 3, reason: '텍스트 조합', textValue: truncatedText },
-      { duplicateScore: 55, element }
-    );
-    if (textCandidate) {
-      textCandidate.matchMode = textCandidate.matchMode || 'exact';
-      registry.add(textCandidate);
-    }
-  }
+  collectTextCandidates(element, registry);
 
   const robustXPath = buildRobustXPath(element);
   if (robustXPath) {

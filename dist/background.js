@@ -670,6 +670,17 @@ chrome.runtime.onInstalled.addListener(() => {
   console.log('AI Test Recorder installed');
 });
 
+// 확장 프로그램 아이콘 클릭 시 새 창 열기
+chrome.action.onClicked.addListener(() => {
+  chrome.windows.create({
+    url: chrome.runtime.getURL('popup.html'),
+    type: 'popup',
+    width: 1200,
+    height: 800,
+    focused: true
+  });
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   injectedTabs.delete(tabId);
 });

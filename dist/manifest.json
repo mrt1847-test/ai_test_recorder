@@ -13,7 +13,21 @@
     "<all_urls>"
   ],
   "devtools_page": "devtools.html",
+  "action": {
+    "default_title": "AI Test Recorder",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["popup.html", "popup.js", "style.css", "vendor/**/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

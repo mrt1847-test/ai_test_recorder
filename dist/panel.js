@@ -1173,74 +1173,164 @@ function extractAttributes(node) {
   return attributes;
 }
 
-function sanitizeDomNode(node) {
-  if (!node || typeof node !== 'object') return null;
-  const sanitized = {
-    tag: node.tag || null,
-    id: node.id || null,
-    classes: Array.isArray(node.classes) ? node.classes.slice(0, 8) : [],
-    attributes: extractAttributes(node),
-    childCount: typeof node.childCount === 'number' ? node.childCount : null,
-    position: node.position || null,
-    target: false,
-    repeats: false,
-    children: []
-  };
-  if (node.text) {
-    const trimmed = String(node.text).replace(/\s+/g, ' ').trim();
-    sanitized.text = trimmed.length > 160 ? `${trimmed.slice(0, 157)}…` : trimmed;
+function sanitizeDomNode(summary) {
+  if (!summary || typeof summary !== 'object') return null;
+  const node = {};
+  if (summary.tag) {
+    node.tag = summary.tag;
   }
-  if (sanitized.position && typeof sanitized.position === 'object') {
-    const total = sanitized.position.total;
-    sanitized.repeats = typeof total === 'number' ? total > 1 : false;
+  if (summary.id) {
+    node.id = summary.id;
   }
-  return sanitized;
+  if (Array.isArray(summary.classes) && summary.classes.length) {
+    node.classes = summary.classes.slice(0, 8);
+  }
+  const attrs = summary.attributes && typeof summary.attributes === 'object' ? summary.attributes : null;
+  if (attrs && Object.keys(attrs).length) {
+    node.attributes = { ...attrs };
+  }
+  if (summary.text) {
+    node.text = summary.text;
+  }
+  if (summary.value) {
+    node.value = summary.value;
+  }
+  node.children = [];
+  return node.tag || node.text || node.id || (node.classes && node.classes.length) || (node.attributes && Object.keys(node.attributes).length)
+    ? node
+    : null;
 }
 
-function buildDomNodes(event) {
-  if (!event || typeof event !== 'object') return [];
-  const nodes = [];
+function buildDomTree(event) {
+  if (!event || typeof event !== 'object') return null;
   const context = event.domContext || {};
-  const ancestors = Array.isArray(context.ancestors) ? context.ancestors.slice(-12) : [];
-  ancestors.forEach((ancestor) => {
-    const node = sanitizeDomNode(ancestor);
-    if (node) nodes.push(node);
-  });
+  const pathSummaries = [];
 
-  const targetRaw = event.target || null;
-  const targetNode = sanitizeDomNode(targetRaw);
-  if (targetNode) {
-    targetNode.target = true;
-    const childNodes = Array.isArray(context.children) ? context.children.slice(0, 12) : [];
-    targetNode.children = childNodes.map((child) => sanitizeDomNode(child)).filter(Boolean);
-    nodes.push(targetNode);
+  if (context.root) {
+    pathSummaries.push(context.root);
   }
 
-  return nodes;
+  const ancestorSummaries = Array.isArray(context.ancestors)
+    ? context.ancestors.slice().reverse()
+    : [];
+  ancestorSummaries.forEach((summary) => {
+    pathSummaries.push(summary);
+  });
+
+  let rootNode = null;
+  let currentNode = null;
+
+  pathSummaries.forEach((summary) => {
+    const node = sanitizeDomNode(summary);
+    if (!node) return;
+    node.children = node.children || [];
+    if (!rootNode) {
+      rootNode = node;
+    } else if (currentNode) {
+      if (!currentNode.children) currentNode.children = [];
+      currentNode.children.push(node);
+    }
+    currentNode = node;
+  });
+
+  const targetSummary = context.self || event.target || null;
+  let parentNode = currentNode;
+
+  if (!rootNode) {
+    if (targetSummary) {
+      rootNode = sanitizeDomNode(targetSummary) || null;
+      if (rootNode) {
+        rootNode.target = true;
+        parentNode = rootNode;
+      }
+    }
+  }
+
+  if (!rootNode) {
+    return null;
+  }
+
+  if (!parentNode) {
+    parentNode = rootNode;
+  }
+
+  const siblingSummaries = Array.isArray(context.siblings) ? context.siblings.slice() : [];
+  const entries = siblingSummaries.map((summary) => ({
+    summary,
+    isTarget: false
+  }));
+  if (targetSummary) {
+    entries.push({ summary: targetSummary, isTarget: true });
+  }
+
+  if (entries.length) {
+    entries.sort((a, b) => {
+      const aIndex = a.summary && a.summary.position && typeof a.summary.position.index === 'number'
+        ? a.summary.position.index
+        : (a.isTarget ? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER - 1);
+      const bIndex = b.summary && b.summary.position && typeof b.summary.position.index === 'number'
+        ? b.summary.position.index
+        : (b.isTarget ? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER - 1);
+      return aIndex - bIndex;
+    });
+
+    parentNode.children = entries
+      .map(({ summary, isTarget }) => {
+        const node = sanitizeDomNode(summary);
+        if (!node) return null;
+        if (isTarget) {
+          node.target = true;
+          const childSummaries = Array.isArray(context.children) ? context.children : [];
+          node.children = childSummaries
+            .map((child) => sanitizeDomNode(child))
+            .filter(Boolean);
+        }
+        return node;
+      })
+      .filter(Boolean);
+  } else if (targetSummary) {
+    const node = sanitizeDomNode(targetSummary);
+    if (node) {
+      node.target = true;
+      const childSummaries = Array.isArray(context.children) ? context.children : [];
+      node.children = childSummaries
+        .map((child) => sanitizeDomNode(child))
+        .filter(Boolean);
+      if (!parentNode.children) parentNode.children = [];
+      parentNode.children.push(node);
+    }
+  }
+
+  function pruneEmptyChildren(node) {
+    if (!node || !Array.isArray(node.children)) return;
+    node.children = node.children.filter(Boolean);
+    node.children.forEach((child) => pruneEmptyChildren(child));
+    if (!node.children.length) {
+      delete node.children;
+    }
+  }
+
+  pruneEmptyChildren(rootNode);
+
+  return rootNode;
 }
 
 function sanitizeTarget(target) {
   if (!target || typeof target !== 'object') return null;
-  const sanitized = {
-    tag: target.tag || null,
-    id: target.id || null,
-    classes: Array.isArray(target.classes) ? target.classes.slice(0, 8) : [],
-    attributes: extractAttributes(target),
-    childCount: typeof target.childCount === 'number' ? target.childCount : null,
-    position: target.position && typeof target.position === 'object'
-      ? {
-          index: typeof target.position.index === 'number' ? target.position.index : null,
-          nthOfType: typeof target.position.nthOfType === 'number' ? target.position.nthOfType : null,
-          total: typeof target.position.total === 'number' ? target.position.total : null
-        }
-      : null,
-    repeats: target.repeats === true || (target.position && typeof target.position.total === 'number'
-      ? target.position.total > 1
-      : false)
-  };
-  if (target.text) {
-    const trimmed = String(target.text).replace(/\s+/g, ' ').trim();
-    sanitized.text = trimmed.length > 160 ? `${trimmed.slice(0, 157)}…` : trimmed;
+  const domContext = target.domContext || null;
+  const baseSummary = domContext && domContext.self
+    ? domContext.self
+    : {
+        tag: target.tag || null,
+        id: target.id || null,
+        classes: Array.isArray(target.classes) ? target.classes : null,
+        attributes: extractAttributes(target),
+        text: target.text || null,
+        value: target.value || null
+      };
+  const sanitized = sanitizeDomNode(baseSummary);
+  if (sanitized) {
+    delete sanitized.children;
   }
   return sanitized;
 }
@@ -1248,13 +1338,14 @@ function sanitizeTarget(target) {
 function buildAiRequestPayload(event) {
   if (!event || typeof event !== 'object') return null;
   const iframeContext = event.iframeContext || (event.frame && event.frame.iframeContext) || null;
-  const domNodes = buildDomNodes(event);
+  const domRoot = buildDomTree(event);
+  const domPayload = domRoot ? { root: domRoot } : null;
   return {
     action: event.action || null,
     value: event.value !== undefined ? event.value : null,
     timestamp: event.timestamp || null,
     iframeContext,
-    dom: domNodes.length ? { nodes: domNodes } : null,
+    dom: domPayload,
     target: sanitizeTarget(event.target),
     page: event.page ? { url: event.page.url || null, title: event.page.title || null } : null,
     clientRect: event.clientRect || null,
@@ -1529,8 +1620,17 @@ function legacyCopyToClipboard(text) {
   });
 }
 
+function canUseAsyncClipboard() {
+  if (typeof navigator === 'undefined' || typeof window === 'undefined') return false;
+  if (!window.isSecureContext) return false;
+  if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') return false;
+  const protocol = (window.location && window.location.protocol) || '';
+  if (protocol && protocol.toLowerCase().startsWith('devtools')) return false;
+  return true;
+}
+
 function copyTextToClipboard(text) {
-  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+  if (canUseAsyncClipboard()) {
     return navigator.clipboard.writeText(text).catch((err) => {
       console.warn('[AI Test Recorder] navigator.clipboard.writeText failed, falling back:', err);
       return legacyCopyToClipboard(text);
@@ -2031,15 +2131,20 @@ function renderSelectorGroup(candidates, options = {}) {
       ? listRef[listIndex]
       : (Array.isArray(candidates) ? candidates[listIndex] : null);
     if (!candidateRef || !candidateRef.selector) return;
-    const displayCandidate = (mode === 'repeat' && candidateRef.rawSelector)
+    const autoCandidate = mode === 'repeat' && candidateRef.__autoDerived ? candidateRef.__autoDerived : null;
+    const effectiveCandidate = autoCandidate ? autoCandidate : candidateRef;
+    const sourceIndex = typeof effectiveCandidate.__sourceIndex === 'number'
+      ? effectiveCandidate.__sourceIndex
+      : (typeof candidateRef.__sourceIndex === 'number' ? candidateRef.__sourceIndex : listIndex);
+    const displayCandidate = (mode === 'repeat' && effectiveCandidate.rawSelector)
       ? {
-          ...candidateRef,
-          selector: candidateRef.rawSelector,
-          type: candidateRef.rawType || candidateRef.type || inferSelectorType(candidateRef.rawSelector),
-          matchCount: candidateRef.rawMatchCount !== undefined ? candidateRef.rawMatchCount : candidateRef.matchCount,
-          reason: candidateRef.rawReason || candidateRef.reason || ''
+          ...effectiveCandidate,
+          selector: effectiveCandidate.rawSelector,
+          type: effectiveCandidate.rawType || effectiveCandidate.type || inferSelectorType(effectiveCandidate.rawSelector),
+          matchCount: effectiveCandidate.rawMatchCount !== undefined ? effectiveCandidate.rawMatchCount : effectiveCandidate.matchCount,
+          reason: effectiveCandidate.rawReason || effectiveCandidate.reason || ''
         }
-      : candidateRef;
+      : effectiveCandidate;
     const selectorType = displayCandidate.type || inferSelectorType(displayCandidate.selector);
     const matchCount = typeof displayCandidate.matchCount === 'number' ? displayCandidate.matchCount : null;
     const contextMatchCount = typeof displayCandidate.contextMatchCount === 'number' ? displayCandidate.contextMatchCount : null;
@@ -2049,24 +2154,24 @@ function renderSelectorGroup(candidates, options = {}) {
       if (effectiveCount !== null && effectiveCount !== 1) {
         return;
       }
-      if (candidateRef.unique === false) {
+      if (displayCandidate.unique === false) {
         return;
       }
     }
     const item = document.createElement('div');
     item.className = 'selector-item';
-    const candidateMatchMode = displayCandidate.matchMode || candidateRef.matchMode || (selectorType === 'text' ? 'exact' : null);
+    const candidateMatchMode = displayCandidate.matchMode || (autoCandidate ? autoCandidate.matchMode : candidateRef.matchMode) || (selectorType === 'text' ? 'exact' : null);
     const primaryMatchMode = event && event.primarySelectorMatchMode
       ? event.primarySelectorMatchMode
       : (selectorType === 'text' ? 'exact' : null);
     const isApplied =
       !!event &&
-      event.primarySelector === candidateRef.selector &&
-      (event.primarySelectorType ? event.primarySelectorType === (candidateRef.type || selectorType) : true) &&
+      event.primarySelector === displayCandidate.selector &&
+      (event.primarySelectorType ? event.primarySelectorType === (displayCandidate.type || selectorType) : true) &&
       (selectorType !== 'text' || candidateMatchMode === primaryMatchMode);
     const scoreLabel = typeof displayCandidate.score === 'number'
       ? `${displayCandidate.score}%`
-      : (typeof candidateRef.score === 'number' ? `${candidateRef.score}%` : '');
+      : (typeof effectiveCandidate.score === 'number' ? `${effectiveCandidate.score}%` : '');
     const typeLabel = (selectorType || 'css').toUpperCase();
     item.innerHTML = `
       <div class="selector-main">
@@ -2084,7 +2189,7 @@ function renderSelectorGroup(candidates, options = {}) {
     const highlightBtn = item.querySelector('.highlight-btn');
     if (applyBtn) {
       applyBtn.addEventListener('click', () => {
-        applySelector({ ...displayCandidate }, resolvedIndex, source, listIndex);
+        applySelector({ ...displayCandidate }, resolvedIndex, source, sourceIndex);
       });
     }
     if (highlightBtn) {
@@ -2104,12 +2209,43 @@ function renderSelectorGroup(candidates, options = {}) {
       containsBtn.textContent = '포함';
 
       const updateButtons = () => {
-        const currentMode = candidateRef.matchMode || 'exact';
+        const currentMode = (autoCandidate ? autoCandidate.matchMode : candidateRef.matchMode) || 'exact';
         exactBtn.classList.toggle('active', currentMode === 'exact');
         containsBtn.classList.toggle('active', currentMode === 'contains');
       };
 
       const setMode = (mode) => {
+        if (mode === (candidateRef.matchMode || 'exact')) return;
+        candidateRef.matchMode = mode;
+        if (candidateRef.__autoDerived) {
+          candidateRef.__autoDerived.matchMode = mode;
+        }
+        if (Array.isArray(listRef) && listRef[listIndex]) {
+          listRef[listIndex].matchMode = mode;
+          if (listRef[listIndex].__autoDerived) {
+            listRef[listIndex].__autoDerived.matchMode = mode;
+          }
+        }
+        if (event) {
+          if (source === 'ai') {
+            if (!Array.isArray(event.aiSelectorCandidates)) {
+              event.aiSelectorCandidates = [];
+            }
+            if (event.aiSelectorCandidates[sourceIndex]) {
+              event.aiSelectorCandidates[sourceIndex].matchMode = mode;
+            }
+          } else if (Array.isArray(event.selectorCandidates) && event.selectorCandidates[sourceIndex]) {
+            event.selectorCandidates[sourceIndex].matchMode = mode;
+          }
+        }
+        if (
+          event &&
+          event.primarySelector === candidateRef.selector &&
+          (event.primarySelectorType ? event.primarySelectorType === selectorType : true)
+        ) {
+          event.primarySelectorMatchMode = mode;
+          applySelector({ ...candidateRef, matchMode: mode }, resolvedIndex, source, sourceIndex);
+        }
         if (mode === (candidateRef.matchMode || 'exact')) return;
         candidateRef.matchMode = mode;
         if (Array.isArray(listRef) && listRef[listIndex]) {
@@ -2120,20 +2256,20 @@ function renderSelectorGroup(candidates, options = {}) {
             if (!Array.isArray(event.aiSelectorCandidates)) {
               event.aiSelectorCandidates = [];
             }
-            if (event.aiSelectorCandidates[listIndex]) {
-              event.aiSelectorCandidates[listIndex].matchMode = mode;
+            if (event.aiSelectorCandidates[sourceIndex]) {
+              event.aiSelectorCandidates[sourceIndex].matchMode = mode;
             }
-          } else if (Array.isArray(event.selectorCandidates) && event.selectorCandidates[listIndex]) {
-            event.selectorCandidates[listIndex].matchMode = mode;
+          } else if (Array.isArray(event.selectorCandidates) && event.selectorCandidates[sourceIndex]) {
+            event.selectorCandidates[sourceIndex].matchMode = mode;
           }
         }
         if (
           event &&
-          event.primarySelector === candidateRef.selector &&
+          event.primarySelector === displayCandidate.selector &&
           (event.primarySelectorType ? event.primarySelectorType === selectorType : true)
         ) {
           event.primarySelectorMatchMode = mode;
-          applySelector({ ...candidateRef, matchMode: mode }, resolvedIndex, source, listIndex);
+          applySelector({ ...candidateRef, matchMode: mode }, resolvedIndex, source, sourceIndex);
         }
         updateButtons();
       };
@@ -2154,7 +2290,7 @@ function renderSelectorGroup(candidates, options = {}) {
     }
 
     if (mode === 'repeat') {
-      const positionInfo = getTargetPositionInfo(event);
+      const positionInfo = resolveSelectorPosition(event);
       const metaLines = [];
       const displayCount = typeof matchCount === 'number'
         ? matchCount
@@ -2180,14 +2316,18 @@ function renderSelectorGroup(candidates, options = {}) {
 function buildSelectorTabGroups(event, baseCandidates, aiCandidates) {
   const safeBase = Array.isArray(baseCandidates) ? baseCandidates : [];
   const safeAi = Array.isArray(aiCandidates) ? aiCandidates : [];
+  const uniqueBaseList = [];
+  const uniqueAiList = [];
+
   const createGroup = (listRef) => ({
     listRef,
     indices: []
   });
+
   const groups = {
     unique: {
-      base: createGroup(safeBase),
-      ai: createGroup(safeAi)
+      base: createGroup(uniqueBaseList),
+      ai: createGroup(uniqueAiList)
     },
     repeat: {
       base: createGroup(safeBase),
@@ -2202,20 +2342,45 @@ function buildSelectorTabGroups(event, baseCandidates, aiCandidates) {
     }
   };
 
+  const registerUnique = (source, candidate, originalIndex, options = {}) => {
+    if (!candidate || !candidate.selector) return;
+    const targetList = source === 'ai' ? uniqueAiList : uniqueBaseList;
+    const stored = { ...candidate, __sourceIndex: originalIndex };
+    if (options.derived === true) {
+      stored.__derived = true;
+    }
+    const newIndex = targetList.push(stored) - 1;
+    addIndex(groups.unique, source, newIndex);
+  };
+
   const assign = (listRef, source) => {
     if (!Array.isArray(listRef)) return;
     listRef.forEach((candidate, index) => {
       if (!candidate || !candidate.selector) return;
       const finalMatchCount = typeof candidate.matchCount === 'number' ? candidate.matchCount : null;
-      const rawMatchCount = typeof candidate.rawMatchCount === 'number' ? candidate.rawMatchCount : finalMatchCount;
-      const finalUnique = candidate.unique === true || finalMatchCount === 1;
-      if (finalUnique) {
-        addIndex(groups.unique, source, index);
+      const isAlreadyUnique = candidate.unique === true || finalMatchCount === 1;
+
+      if (isAlreadyUnique) {
+        registerUnique(source, candidate, index);
       }
-      if ((typeof rawMatchCount === 'number' && rawMatchCount > 1) || candidate.unique === false) {
-        addIndex(groups.repeat, source, index);
-      } else if (!finalUnique && (rawMatchCount === null || rawMatchCount === undefined)) {
-        addIndex(groups.repeat, source, index);
+
+      addIndex(groups.repeat, source, index);
+
+      if (isAlreadyUnique) return;
+
+      const derivedCandidate = enforceNthSelectorIfNeeded({ ...candidate }, event);
+      if (derivedCandidate && derivedCandidate.unique === true) {
+        registerUnique(source, derivedCandidate, index, { derived: true });
+        const auto = {
+          ...derivedCandidate,
+          rawSelector: candidate.selector,
+          rawType: candidate.type || inferSelectorType(candidate.selector),
+          rawMatchCount: candidate.matchCount,
+          rawReason: candidate.reason,
+          __sourceIndex: index,
+          __derived: true
+        };
+        listRef[index] = { ...candidate, __autoDerived: auto };
       }
     });
   };
@@ -2348,6 +2513,38 @@ function getTargetPositionInfo(event) {
   return null;
 }
 
+function resolveSelectorPosition(event) {
+  const info = getTargetPositionInfo(event);
+  if (info && info.nthOfType) {
+    if (!info.repeats && event && typeof event.primarySelectorNth === 'number') {
+      const nth = event.primarySelectorNth;
+      return {
+        ...info,
+        nthOfType: nth,
+        total: info.total || event.primarySelectorNthTotal || null,
+        index: typeof info.index === 'number' ? info.index : (nth > 0 ? nth - 1 : null),
+        tag: info.tag || event.primarySelectorNthTag || null,
+        repeats: true
+      };
+    }
+    return info;
+  }
+  if (!event || typeof event !== 'object') return info;
+  if (typeof event.primarySelectorNth === 'number') {
+    const nth = event.primarySelectorNth;
+    return {
+      nthOfType: nth,
+      total: event.primarySelectorNthTotal || null,
+      index: typeof event.primarySelectorNthIndex === 'number'
+        ? event.primarySelectorNthIndex
+        : (nth > 0 ? nth - 1 : null),
+      tag: event.primarySelectorNthTag || null,
+      repeats: true
+    };
+  }
+  return info;
+}
+
 function selectorLikelyStable(selector) {
   if (!selector || typeof selector !== 'string') return false;
   // id, data-* 속성, aria-* 속성 등이 포함되면 충분히 안정적인 것으로 판단
@@ -2376,11 +2573,13 @@ function appendNthToSelector(selector, nth) {
 function enforceNthSelectorIfNeeded(candidate, event) {
   if (!candidate || !event) return candidate;
   const type = candidate.type || inferSelectorType(candidate.selector);
-  if (!type || type === 'xpath' || type === 'xpath-full' || type === 'text') {
+  if (!type || type === 'xpath' || type === 'xpath-full') {
     return candidate;
   }
   const positionInfo = getTargetPositionInfo(event);
   if (!positionInfo) return candidate;
+  const nth = positionInfo.nthOfType;
+  const total = positionInfo.total;
   const matchCount = typeof candidate.matchCount === 'number' ? candidate.matchCount : null;
   const repeated = positionInfo.repeats === true || (typeof positionInfo.total === 'number' && positionInfo.total > 1);
   const needsNth =
@@ -2388,20 +2587,79 @@ function enforceNthSelectorIfNeeded(candidate, event) {
     candidate.unique === false ||
     (!selectorLikelyStable(candidate.selector) && repeated);
   if (!needsNth) return candidate;
-  const appended = appendNthToSelector(candidate.selector, positionInfo.nthOfType);
-  if (!appended) return candidate;
   const reasonParts = (candidate.reason ? candidate.reason.split(' • ') : []).filter(Boolean);
-  const nthLabel = `nth-of-type(${positionInfo.nthOfType}) 적용`;
+  const nthLabel = `nth-of-type(${nth}) 적용`;
+
+  if (type === 'text') {
+    const filtered = reasonParts.filter((part) => !/개 요소와 일치|유일 일치/.test(part));
+    if (!reasonParts.includes(nthLabel)) {
+      filtered.push(nthLabel);
+    }
+    return {
+      ...candidate,
+      reason: filtered.join(' • '),
+      unique: true,
+      matchCount: 1,
+      __nthApplied: nth,
+      __nthTotal: total,
+      __nthTag: positionInfo.tag || null
+    };
+  }
+
+  const appended = appendNthToSelector(candidate.selector, nth);
+  if (!appended) return candidate;
   if (!reasonParts.includes(nthLabel)) {
     reasonParts.push(nthLabel);
+  }
+  const filtered = reasonParts.filter((part) => !/개 요소와 일치|유일 일치/.test(part));
+  if (!filtered.includes(nthLabel)) {
+    filtered.push(nthLabel);
   }
   return {
     ...candidate,
     selector: appended,
-    reason: reasonParts.join(' • '),
+    reason: filtered.join(' • '),
     unique: true,
-    matchCount: 1
+    matchCount: 1,
+    __nthApplied: nth,
+    __nthTotal: total,
+    __nthTag: positionInfo.tag || null
   };
+}
+
+function mergeCandidateIntoCollection(collection, listIndex, candidateToApply) {
+  if (!Array.isArray(collection) || listIndex < 0 || listIndex >= collection.length) return;
+  const existing = collection[listIndex] || null;
+  const merged = existing ? { ...existing, ...candidateToApply } : { ...candidateToApply };
+  if (existing) {
+    const shouldPreserveSelector =
+      existing.selector &&
+      existing.rawSelector &&
+      existing.selector !== existing.rawSelector &&
+      candidateToApply.selector === existing.rawSelector;
+    if (shouldPreserveSelector) {
+      merged.selector = existing.selector;
+      merged.type = existing.type;
+      merged.reason = existing.reason;
+      if (existing.matchCount !== undefined) merged.matchCount = existing.matchCount;
+      if (existing.unique !== undefined) merged.unique = existing.unique;
+      if (existing.uniqueInContext !== undefined) merged.uniqueInContext = existing.uniqueInContext;
+    }
+    if (existing.rawSelector !== undefined && merged.rawSelector === undefined) {
+      merged.rawSelector = existing.rawSelector;
+    }
+    if (existing.rawType !== undefined && merged.rawType === undefined) {
+      merged.rawType = existing.rawType;
+    }
+    if (existing.rawReason !== undefined && merged.rawReason === undefined) {
+      merged.rawReason = existing.rawReason;
+    }
+    if (existing.rawMatchCount !== undefined && merged.rawMatchCount === undefined) {
+      merged.rawMatchCount = existing.rawMatchCount;
+    }
+  }
+  delete merged.__autoDerived;
+  collection[listIndex] = merged;
 }
 
 function applySelector(s, eventIndex, source = 'base', listIndex = -1) {
@@ -2421,19 +2679,9 @@ function applySelector(s, eventIndex, source = 'base', listIndex = -1) {
         if (!Array.isArray(targetEvent.aiSelectorCandidates)) {
           targetEvent.aiSelectorCandidates = [];
         }
-        if (listIndex >= 0 && listIndex < targetEvent.aiSelectorCandidates.length) {
-          targetEvent.aiSelectorCandidates[listIndex] = {
-            ...targetEvent.aiSelectorCandidates[listIndex],
-            ...candidateToApply
-          };
-        } else if (listIndex === -1) {
-          targetEvent.aiSelectorCandidates.push({ ...candidateToApply });
-        }
-      } else if (Array.isArray(targetEvent.selectorCandidates) && listIndex >= 0 && listIndex < targetEvent.selectorCandidates.length) {
-        targetEvent.selectorCandidates[listIndex] = {
-          ...targetEvent.selectorCandidates[listIndex],
-          ...candidateToApply
-        };
+        mergeCandidateIntoCollection(targetEvent.aiSelectorCandidates, listIndex, candidateToApply);
+      } else if (Array.isArray(targetEvent.selectorCandidates)) {
+        mergeCandidateIntoCollection(targetEvent.selectorCandidates, listIndex, candidateToApply);
       }
 
       targetEvent.primarySelector = candidateToApply.selector;
@@ -2452,6 +2700,15 @@ function applySelector(s, eventIndex, source = 'base', listIndex = -1) {
         targetEvent.primarySelectorXPath = candidateToApply.xpathValue || s.xpathValue;
       } else if (selectorType !== 'xpath') {
         delete targetEvent.primarySelectorXPath;
+      }
+      if (candidateToApply.__nthApplied) {
+        targetEvent.primarySelectorNth = candidateToApply.__nthApplied;
+        targetEvent.primarySelectorNthTotal = candidateToApply.__nthTotal || null;
+        targetEvent.primarySelectorNthTag = candidateToApply.__nthTag || null;
+      } else {
+        delete targetEvent.primarySelectorNth;
+        delete targetEvent.primarySelectorNthTotal;
+        delete targetEvent.primarySelectorNthTag;
       }
 
       chrome.storage.local.set({events: evs}, () => {
@@ -2473,6 +2730,15 @@ function applySelector(s, eventIndex, source = 'base', listIndex = -1) {
             allEvents[targetIndex].primarySelectorXPath = candidateToApply.xpathValue || s.xpathValue;
           } else if (selectorType !== 'xpath') {
             delete allEvents[targetIndex].primarySelectorXPath;
+          }
+          if (candidateToApply.__nthApplied) {
+            allEvents[targetIndex].primarySelectorNth = candidateToApply.__nthApplied;
+            allEvents[targetIndex].primarySelectorNthTotal = candidateToApply.__nthTotal || null;
+            allEvents[targetIndex].primarySelectorNthTag = candidateToApply.__nthTag || null;
+          } else {
+            delete allEvents[targetIndex].primarySelectorNth;
+            delete allEvents[targetIndex].primarySelectorNthTotal;
+            delete allEvents[targetIndex].primarySelectorNthTag;
           }
           if (source === 'ai') {
             allEvents[targetIndex].aiSelectorCandidates = targetEvent.aiSelectorCandidates;
@@ -4147,7 +4413,7 @@ function buildPlaywrightPythonAction(ev, selectorInfo, base = 'page') {
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
   const locatorExpr = buildPlaywrightLocatorExpressionForAction(base, selectorInfo, true);
   const value = escapeForPythonString(ev.value || '');
-  const positionInfo = getTargetPositionInfo(ev);
+  const positionInfo = resolveSelectorPosition(ev);
   
   if (ev.action === 'click') {
     if (selectorInfo.type === 'text' && positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
@@ -4170,7 +4436,7 @@ function buildPlaywrightJSAction(ev, selectorInfo, base = 'page') {
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
   const locatorExpr = buildPlaywrightLocatorExpressionForAction(base, selectorInfo, false);
   const value = escapeForJSString(ev.value || '');
-  const positionInfo = getTargetPositionInfo(ev);
+  const positionInfo = resolveSelectorPosition(ev);
   
   if (ev.action === 'click') {
     if (selectorInfo.type === 'text' && positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
@@ -4193,7 +4459,7 @@ function buildSeleniumPythonAction(ev, selectorInfo, driverVar = 'driver') {
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
   const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
   const value = escapeForPythonString(ev.value || '');
-  const positionInfo = getTargetPositionInfo(ev);
+  const positionInfo = resolveSelectorPosition(ev);
   if (selectorType === 'xpath') {
     const xpath = escapeForPythonString(getXPathValue(selectorInfo));
     if (ev.action === 'click') {
@@ -4236,7 +4502,7 @@ function buildSeleniumJSAction(ev, selectorInfo) {
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
   const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
   const value = escapeForJSString(ev.value || '');
-  const positionInfo = getTargetPositionInfo(ev);
+  const positionInfo = resolveSelectorPosition(ev);
   if (selectorType === 'xpath') {
     const xpath = escapeForJSString(getXPathValue(selectorInfo));
     if (ev.action === 'click') {

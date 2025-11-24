@@ -274,9 +274,7 @@ chrome.storage.local.get({ recordingStartUrl: '' }, (data) => {
   }
 });
 const contentScriptReadyTabs = new Set();
-const inspectedTabId = (typeof chrome !== 'undefined' && chrome.devtools && chrome.devtools.inspectedWindow)
-  ? chrome.devtools.inspectedWindow.tabId
-  : null;
+const inspectedTabId = null; // 팝업에서는 devtools API를 사용할 수 없음
 
 function sanitizeAiSettingValue(raw) {
   if (typeof raw !== 'string') return '';
@@ -777,32 +775,70 @@ function withActiveTab(callback) {
       callback(null);
       return;
     }
+    // panel.js와 동일하게 URL 필터링 없이 주입 시도
+    // background.js에서 주입 불가능한 페이지는 자동으로 에러 처리됨
     ensureContentScriptInjected(tab.id)
       .then(() => callback(tab))
       .catch((error) => {
         console.error('[AI Test Recorder] Failed to inject content script:', error);
-        alert('콘텐츠 스크립트를 주입할 수 없습니다. 페이지를 새로고침한 후 다시 시도해주세요.');
+        const errorMsg = error.message || '';
+        if (errorMsg.includes('Cannot access contents of url')) {
+          alert('이 페이지에서는 콘텐츠 스크립트를 주입할 수 없습니다. 일반 웹 페이지에서 시도해주세요.');
+        } else {
+          alert('콘텐츠 스크립트를 주입할 수 없습니다. 페이지를 새로고침한 후 다시 시도해주세요.');
+        }
         callback(null);
       });
   };
 
-  if (typeof inspectedTabId === 'number' && chrome.tabs && typeof chrome.tabs.get === 'function') {
-    chrome.tabs.get(inspectedTabId, (tab) => {
-      if (chrome.runtime.lastError || !tab) {
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-          const fallbackTab = tabs && tabs[0] ? tabs[0] : null;
-          deliverTab(fallbackTab);
+  // 팝업에서는 모든 창에서 활성 탭을 찾되, 일반 브라우저 창의 탭만 선택
+  // popup 창이 아닌 실제 브라우저 창의 탭을 찾기 위해 windowType 확인
+  chrome.tabs.query({ active: true }, (tabs) => {
+    if (!tabs || tabs.length === 0) {
+      deliverTab(null);
+      return;
+    }
+    
+    // 각 탭의 창 타입 확인하여 일반 브라우저 창의 탭만 선택
+    const windowPromises = tabs.map(tab => {
+      return new Promise((resolve) => {
+        chrome.windows.get(tab.windowId, (win) => {
+          if (chrome.runtime.lastError) {
+            resolve({ tab, isNormal: false });
+            return;
+          }
+          // 'normal' 타입 창의 탭만 선택 (popup, devtools 등 제외)
+          resolve({ tab, isNormal: win.type === 'normal' });
         });
-        return;
+      });
+    });
+    
+    Promise.all(windowPromises).then((results) => {
+      // 일반 브라우저 창의 탭만 필터링
+      const normalTabs = results
+        .filter(r => r.isNormal)
+        .map(r => r.tab);
+      
+      // 일반 웹 페이지 탭만 필터링 (chrome://, chrome-extension:// 등 제외)
+      const webTabs = (normalTabs.length > 0 ? normalTabs : tabs).filter(tab => {
+        const url = tab.url || '';
+        return !url.startsWith('chrome://') && 
+               !url.startsWith('chrome-extension://') && 
+               !url.startsWith('about:') &&
+               !url.startsWith('edge://');
+      });
+      
+      // 웹 탭이 있으면 첫 번째 웹 탭, 없으면 첫 번째 일반 탭 사용
+      const tab = webTabs && webTabs.length > 0 ? webTabs[0] : 
+                  (normalTabs.length > 0 ? normalTabs[0] : 
+                   (tabs && tabs[0] ? tabs[0] : null));
+      
+      if (tab) {
+        console.log('[AI Test Recorder] Selected tab:', tab.id, tab.url);
       }
+      
       deliverTab(tab);
     });
-    return;
-  }
-
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    const tab = tabs && tabs[0] ? tabs[0] : null;
-    deliverTab(tab);
   });
 }
 
@@ -1456,7 +1492,7 @@ function requestAiSelectorsForEvent(event, eventIndex) {
     framework: selectedFramework,
     language: selectedLanguage,
     aiModel: aiSettings.model || '',
-    tabId: inspectedTabId
+    tabId: null // 팝업에서는 withActiveTab에서 처리
   };
   chrome.runtime.sendMessage(
     {
@@ -1648,7 +1684,7 @@ function buildAiSelectorPrompt(event) {
     framework: selectedFramework,
     language: selectedLanguage,
     aiModel: aiSettings.model || '',
-    tabId: inspectedTabId
+    tabId: null // 팝업에서는 withActiveTab에서 처리
   };
   const requestEnvelope = {
     type: 'REQUEST_AI_SELECTORS',
