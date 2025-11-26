@@ -177,26 +177,27 @@ function handleRightClick(event) {
 
 /**
  * 마우스 호버 이벤트를 감지해 녹화 중일 때만 기록한다.
+ * 주의: hover는 자동 수집하지 않음 - 사용자가 Action 메뉴에서 선택했을 때만 수집
  */
-function handleHover(event) {
-  if (!recorderState.isRecording) return;
-  if (elementSelectionState.mode) return;
-  const target = event.target;
-  if (!target || target === document.body || target === document.documentElement) return;
-  if (target.id === '__ai_test_recorder_overlay__' || (target.closest && target.closest('#__ai_test_recorder_overlay__'))) {
-    return;
-  }
-  // hover는 debounce 적용 (너무 많은 이벤트 방지)
-  const existingTimer = inputTimers.get(target);
-  if (existingTimer) {
-    return; // 이미 대기 중이면 무시
-  }
-  const timer = setTimeout(() => {
-    recordDomEvent({ action: 'hover', target });
-    inputTimers.delete(target);
-  }, 300); // 300ms debounce
-  inputTimers.set(target, timer);
-}
+// function handleHover(event) {
+//   if (!recorderState.isRecording) return;
+//   if (elementSelectionState.mode) return;
+//   const target = event.target;
+//   if (!target || target === document.body || target === document.documentElement) return;
+//   if (target.id === '__ai_test_recorder_overlay__' || (target.closest && target.closest('#__ai_test_recorder_overlay__'))) {
+//     return;
+//   }
+//   // hover는 debounce 적용 (너무 많은 이벤트 방지)
+//   const existingTimer = inputTimers.get(target);
+//   if (existingTimer) {
+//     return; // 이미 대기 중이면 무시
+//   }
+//   const timer = setTimeout(() => {
+//     recordDomEvent({ action: 'hover', target });
+//     inputTimers.delete(target);
+//   }, 300); // 300ms debounce
+//   inputTimers.set(target, timer);
+// }
 
 /**
  * 드롭다운(select) 변경 이벤트를 감지해 녹화 중일 때만 기록한다.
@@ -357,14 +358,14 @@ export function initRecorderListeners() {
     }
   }, true);
 
-  // 마우스 호버 이벤트 감지
-  document.addEventListener('mouseenter', (event) => {
-    try {
-      handleHover(event);
-    } catch (err) {
-      console.error('[AI Test Recorder] Failed to handle hover event:', err);
-    }
-  }, true);
+  // hover 자동 수집 비활성화 - 사용자가 Action 메뉴에서 선택했을 때만 수집
+  // document.addEventListener('mouseenter', (event) => {
+  //   try {
+  //     handleHover(event);
+  //   } catch (err) {
+  //     console.error('[AI Test Recorder] Failed to handle hover event:', err);
+  //   }
+  // }, true);
 
   // URL 변경 감지 (history API 감지)
   window.addEventListener('popstate', () => {
