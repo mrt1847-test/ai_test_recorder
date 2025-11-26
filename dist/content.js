@@ -2486,6 +2486,10 @@
     if (target.id === "__ai_test_recorder_overlay__" || target.closest && target.closest("#__ai_test_recorder_overlay__")) {
       return;
     }
+    if (event.button === 2) {
+      recordDomEvent({ action: "rightClick", target });
+      return;
+    }
     recordDomEvent({ action: "click", target });
   }
   function handleInput(event) {
@@ -2499,7 +2503,12 @@
       clearTimeout(existingTimer);
     }
     const timer = setTimeout(() => {
-      recordDomEvent({ action: "input", target, value: target.value || target.textContent || "" });
+      const currentValue = target.value || target.textContent || "";
+      if (currentValue === "") {
+        recordDomEvent({ action: "clear", target });
+      } else {
+        recordDomEvent({ action: "input", target, value: currentValue });
+      }
       inputTimers.delete(target);
     }, INPUT_DEBOUNCE_DELAY);
     inputTimers.set(target, timer);
@@ -2514,9 +2523,93 @@
     if (existingTimer) {
       clearTimeout(existingTimer);
       inputTimers.delete(target);
-      recordDomEvent({ action: "input", target, value: target.value || target.textContent || "" });
+      const currentValue = target.value || target.textContent || "";
+      if (currentValue === "") {
+        recordDomEvent({ action: "clear", target });
+      } else {
+        recordDomEvent({ action: "input", target, value: currentValue });
+      }
     }
   }
+  function handleDoubleClick(event) {
+    if (!recorderState.isRecording) return;
+    if (elementSelectionState.mode) return;
+    const target = event.target;
+    if (!target || target === document.body || target === document.documentElement) return;
+    if (target.id === "__ai_test_recorder_overlay__" || target.closest && target.closest("#__ai_test_recorder_overlay__")) {
+      return;
+    }
+    recordDomEvent({ action: "doubleClick", target });
+  }
+  function handleRightClick(event) {
+    if (!recorderState.isRecording) return;
+    if (elementSelectionState.mode) return;
+    const target = event.target;
+    if (!target || target === document.body || target === document.documentElement) return;
+    if (target.id === "__ai_test_recorder_overlay__" || target.closest && target.closest("#__ai_test_recorder_overlay__")) {
+      return;
+    }
+    recordDomEvent({ action: "rightClick", target });
+  }
+  function handleHover(event) {
+    if (!recorderState.isRecording) return;
+    if (elementSelectionState.mode) return;
+    const target = event.target;
+    if (!target || target === document.body || target === document.documentElement) return;
+    if (target.id === "__ai_test_recorder_overlay__" || target.closest && target.closest("#__ai_test_recorder_overlay__")) {
+      return;
+    }
+    const existingTimer = inputTimers.get(target);
+    if (existingTimer) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      recordDomEvent({ action: "hover", target });
+      inputTimers.delete(target);
+    }, 300);
+    inputTimers.set(target, timer);
+  }
+  function handleSelect(event) {
+    if (!recorderState.isRecording) return;
+    if (elementSelectionState.mode) return;
+    const target = event.target;
+    if (!target || target.tagName !== "SELECT") return;
+    if (target.id === "__ai_test_recorder_overlay__" || target.closest && target.closest("#__ai_test_recorder_overlay__")) {
+      return;
+    }
+    const selectedOption = target.options[target.selectedIndex];
+    const value = selectedOption ? selectedOption.text || selectedOption.value || "" : "";
+    recordDomEvent({ action: "select", target, value });
+  }
+  var lastUrl = window.location.href;
+  var lastTitle = document.title;
+  function checkUrlChange() {
+    if (!recorderState.isRecording) return;
+    const currentUrl = window.location.href;
+    const currentTitle = document.title;
+    if (currentUrl !== lastUrl || currentTitle !== lastTitle) {
+      const eventRecord = createEventRecord({
+        action: "goto",
+        value: currentUrl,
+        selectors: [],
+        target: null,
+        iframeContext: null,
+        clientRect: null,
+        metadata: { domEvent: "navigation" },
+        domContext: null
+      });
+      eventRecord.page = {
+        url: currentUrl,
+        title: currentTitle
+      };
+      eventRecord.primarySelector = currentUrl;
+      persistEvent(eventRecord);
+      broadcastRecordedEvent(eventRecord);
+      lastUrl = currentUrl;
+      lastTitle = currentTitle;
+    }
+  }
+  var urlCheckInterval = null;
   function startRecording(options = {}) {
     const { resetEvents = true } = options;
     if (recorderState.isRecording) {
@@ -2536,12 +2629,18 @@
       chrome.storage.local.set({ recording: true });
     }
     removeHighlight();
+    lastUrl = window.location.href;
+    lastTitle = document.title;
   }
   function stopRecording() {
     recorderState.isRecording = false;
     ensureRecordingState(false);
     chrome.storage.local.remove(["recording"]);
     removeHighlight();
+    if (urlCheckInterval) {
+      clearInterval(urlCheckInterval);
+      urlCheckInterval = null;
+    }
   }
   function initRecorderListeners() {
     document.addEventListener("click", (event) => {
@@ -2565,6 +2664,58 @@
         console.error("[AI Test Recorder] Failed to handle blur event:", err);
       }
     }, true);
+    document.addEventListener("change", (event) => {
+      try {
+        handleSelect(event);
+      } catch (err) {
+        console.error("[AI Test Recorder] Failed to handle select event:", err);
+      }
+    }, true);
+    document.addEventListener("dblclick", (event) => {
+      try {
+        handleDoubleClick(event);
+      } catch (err) {
+        console.error("[AI Test Recorder] Failed to handle double click event:", err);
+      }
+    }, true);
+    document.addEventListener("contextmenu", (event) => {
+      try {
+        handleRightClick(event);
+      } catch (err) {
+        console.error("[AI Test Recorder] Failed to handle right click event:", err);
+      }
+    }, true);
+    document.addEventListener("mouseenter", (event) => {
+      try {
+        handleHover(event);
+      } catch (err) {
+        console.error("[AI Test Recorder] Failed to handle hover event:", err);
+      }
+    }, true);
+    window.addEventListener("popstate", () => {
+      try {
+        setTimeout(checkUrlChange, 100);
+      } catch (err) {
+        console.error("[AI Test Recorder] Failed to handle popstate:", err);
+      }
+    });
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+    history.pushState = function(...args) {
+      originalPushState.apply(history, args);
+      setTimeout(checkUrlChange, 100);
+    };
+    history.replaceState = function(...args) {
+      originalReplaceState.apply(history, args);
+      setTimeout(checkUrlChange, 100);
+    };
+    urlCheckInterval = setInterval(() => {
+      try {
+        checkUrlChange();
+      } catch (err) {
+        console.error("[AI Test Recorder] Failed to check URL change:", err);
+      }
+    }, 1e3);
   }
   function getRecordingState() {
     return recorderState.isRecording;
