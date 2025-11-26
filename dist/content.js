@@ -1740,6 +1740,75 @@
   };
   var inputTimers = /* @__PURE__ */ new WeakMap();
 
+  // src/content/events/schema.js
+  var EVENT_SCHEMA_VERSION = 2;
+  function buildPrimarySelectorData(selectors) {
+    if (!Array.isArray(selectors) || selectors.length === 0) return {};
+    const primary = selectors[0];
+    if (!primary || !primary.selector) return {};
+    const type = primary.type || inferSelectorType(primary.selector);
+    return {
+      primarySelector: primary.selector,
+      primarySelectorType: type,
+      primarySelectorText: primary.textValue || null,
+      primarySelectorXPath: primary.xpathValue || null,
+      primarySelectorMatchMode: primary.matchMode || null
+    };
+  }
+  function createEventRecord({
+    action,
+    value = null,
+    selectors = [],
+    target = null,
+    domContext = null,
+    iframeContext = null,
+    clientRect = null,
+    metadata = {},
+    manual
+  }) {
+    const timestamp = Date.now();
+    const targetTag = target && target.tagName ? target.tagName : null;
+    const selectorCandidates = Array.isArray(selectors) ? selectors : [];
+    const primaryData = buildPrimarySelectorData(selectorCandidates);
+    const positionInfo = target ? getElementPositionInfo(target) : null;
+    return {
+      version: EVENT_SCHEMA_VERSION,
+      timestamp,
+      action,
+      value,
+      tag: targetTag,
+      selectorCandidates,
+      iframeContext,
+      page: {
+        // 이벤트가 발생한 페이지의 URL/타이틀을 저장해 재현에 도움을 준다.
+        url: window.location.href,
+        title: document.title
+      },
+      frame: {
+        iframeContext
+      },
+      target: target ? {
+        tag: targetTag,
+        id: target.id || null,
+        classes: target.classList ? Array.from(target.classList) : [],
+        text: (target.innerText || target.textContent || "").trim().slice(0, 200),
+        childCount: target.children ? target.children.length : 0,
+        position: positionInfo,
+        repeats: positionInfo ? positionInfo.total > 1 : false,
+        domContext
+      } : null,
+      clientRect,
+      metadata: {
+        schemaVersion: EVENT_SCHEMA_VERSION,
+        userAgent: navigator.userAgent,
+        ...metadata
+      },
+      manual: manual || null,
+      // primary selector 관련 필드들을 최상위에 병합한다.
+      ...primaryData
+    };
+  }
+
   // src/content/overlay/index.js
   function saveOverlayPosition(left, top) {
     chrome.storage.local.set({ overlayPosition: { left, top } });
@@ -1754,6 +1823,9 @@
     if (!overlayControlsState.buttons.start || !overlayControlsState.container) return;
     overlayControlsState.buttons.start.disabled = !!recorderState.isRecording;
     overlayControlsState.buttons.stop.disabled = !recorderState.isRecording;
+    if (overlayControlsState.buttons.action) {
+      overlayControlsState.buttons.action.disabled = !recorderState.isRecording || !recorderState.currentHighlightedElement;
+    }
     overlayControlsState.container.toggleAttribute("data-selecting", !!elementSelectionState.mode);
   }
   function onOverlayDragMove(event) {
@@ -1921,9 +1993,87 @@
       setOverlayStatus("\uC694\uC18C \uC120\uD0DD \uBAA8\uB4DC\uB97C \uC900\uBE44\uD558\uB294 \uC911...", "info");
       sendOverlayCommand("element_select");
     });
+    const actionContainer = document.createElement("div");
+    actionContainer.style.cssText = "position:relative;flex:1 1 auto;";
+    const actionBtn = document.createElement("button");
+    actionBtn.textContent = "Action \u25BC";
+    actionBtn.style.cssText = buttonStyle;
+    actionBtn.disabled = true;
+    const actionMenu = document.createElement("div");
+    actionMenu.style.cssText = `
+    position:absolute;
+    bottom:100%;
+    left:0;
+    margin-bottom:4px;
+    background:rgba(15,23,42,0.95);
+    backdrop-filter:blur(12px);
+    border:1px solid rgba(255,255,255,0.18);
+    border-radius:8px;
+    padding:4px;
+    min-width:140px;
+    max-height:200px;
+    overflow-y:auto;
+    display:none;
+    z-index:1000;
+    box-shadow:0 8px 24px rgba(11,15,25,0.4);
+  `;
+    const actionOptions = [
+      { value: "click", label: "\uD074\uB9AD" },
+      { value: "doubleClick", label: "\uB354\uBE14 \uD074\uB9AD" },
+      { value: "rightClick", label: "\uC6B0\uD074\uB9AD" },
+      { value: "hover", label: "\uD638\uBC84" },
+      { value: "type", label: "\uC785\uB825" },
+      { value: "clear", label: "\uC785\uB825 \uD544\uB4DC \uBE44\uC6B0\uAE30" },
+      { value: "select", label: "\uB4DC\uB86D\uB2E4\uC6B4 \uC120\uD0DD" }
+    ];
+    actionOptions.forEach((option) => {
+      const optionBtn = document.createElement("button");
+      optionBtn.textContent = option.label;
+      optionBtn.setAttribute("data-action", option.value);
+      optionBtn.style.cssText = `
+      display:block;
+      width:100%;
+      padding:8px 10px;
+      text-align:left;
+      border:none;
+      background:transparent;
+      color:#fff;
+      font-size:12px;
+      cursor:pointer;
+      border-radius:4px;
+      transition:background 0.15s ease;
+    `;
+      optionBtn.addEventListener("mouseenter", () => {
+        optionBtn.style.background = "rgba(255,255,255,0.15)";
+      });
+      optionBtn.addEventListener("mouseleave", () => {
+        optionBtn.style.background = "transparent";
+      });
+      optionBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const action = optionBtn.getAttribute("data-action");
+        handleOverlayAction(action);
+        actionMenu.style.display = "none";
+      });
+      actionMenu.appendChild(optionBtn);
+    });
+    actionBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (actionBtn.disabled) return;
+      const isVisible = actionMenu.style.display === "block";
+      actionMenu.style.display = isVisible ? "none" : "block";
+    });
+    document.addEventListener("click", (e) => {
+      if (!actionContainer.contains(e.target)) {
+        actionMenu.style.display = "none";
+      }
+    }, true);
+    actionContainer.appendChild(actionBtn);
+    actionContainer.appendChild(actionMenu);
     buttonsRow.appendChild(startBtn);
     buttonsRow.appendChild(stopBtn);
     buttonsRow.appendChild(selectBtn);
+    buttonsRow.appendChild(actionContainer);
     const status = document.createElement("div");
     status.style.marginTop = "10px";
     status.style.fontSize = "11px";
@@ -1941,7 +2091,8 @@
     observer.observe(container, { attributes: true });
     overlayControlsState.container = container;
     overlayControlsState.handle = handle;
-    overlayControlsState.buttons = { start: startBtn, stop: stopBtn, select: selectBtn };
+    overlayControlsState.buttons = { start: startBtn, stop: stopBtn, select: selectBtn, action: actionBtn };
+    overlayControlsState.actionMenu = actionMenu;
     overlayControlsState.status = status;
     overlayControlsState.closeButton = closeBtn;
     overlayControlsState.visible = false;
@@ -2051,6 +2202,7 @@
       recorderState.overlayElement.remove();
       recorderState.overlayElement = null;
     }
+    updateOverlayControlsState();
   }
   function applySelectionParentHighlight(element) {
     if (!element || element.nodeType !== 1) return;
@@ -2113,6 +2265,7 @@
     const selectors = getSelectorCandidates(element);
     const rect = element.getBoundingClientRect();
     createSelectorOverlay(rect, selectors);
+    updateOverlayControlsState();
     if (!isSameElement) {
       chrome.runtime.sendMessage({
         type: "ELEMENT_HOVERED",
@@ -2195,6 +2348,78 @@
   function ensureRecordingState(isRecording) {
     recorderState.isRecording = isRecording;
     updateOverlayControlsState();
+  }
+  function handleOverlayAction(action) {
+    if (!recorderState.isRecording) {
+      setOverlayStatus("\uB179\uD654 \uC911\uC774 \uC544\uB2D9\uB2C8\uB2E4.", "error");
+      return;
+    }
+    const element = recorderState.currentHighlightedElement;
+    if (!element) {
+      setOverlayStatus("\uC694\uC18C\uB97C \uBA3C\uC800 \uC120\uD0DD\uD558\uC138\uC694. (\uB9C8\uC6B0\uC2A4\uB97C \uC694\uC18C \uC704\uC5D0 \uC62C\uB824\uBCF4\uC138\uC694)", "error");
+      return;
+    }
+    if (action === "type") {
+      const inputValue = prompt("\uC785\uB825\uD560 \uD14D\uC2A4\uD2B8\uB97C \uC785\uB825\uD558\uC138\uC694:");
+      if (inputValue === null) return;
+      recordOverlayAction(action, element, inputValue);
+    } else if (action === "select") {
+      const selectValue = prompt("\uC120\uD0DD\uD560 \uC635\uC158\uC758 \uD14D\uC2A4\uD2B8 \uB610\uB294 \uAC12\uC744 \uC785\uB825\uD558\uC138\uC694:");
+      if (selectValue === null) return;
+      recordOverlayAction(action, element, selectValue);
+    } else {
+      recordOverlayAction(action, element, null);
+    }
+  }
+  function recordOverlayAction(action, target, value) {
+    try {
+      const selectors = getSelectorCandidates(target) || [];
+      const iframeContext = getIframeContext(target);
+      const clientRect = target.getBoundingClientRect ? {
+        x: Math.round(target.getBoundingClientRect().x || 0),
+        y: Math.round(target.getBoundingClientRect().y || 0),
+        w: Math.round(target.getBoundingClientRect().width || 0),
+        h: Math.round(target.getBoundingClientRect().height || 0)
+      } : { x: 0, y: 0, w: 0, h: 0 };
+      const domContext = buildDomContextSnapshot(target, { includeSelf: true });
+      const eventRecord = createEventRecord({
+        action,
+        value,
+        selectors,
+        target,
+        iframeContext,
+        clientRect,
+        metadata: { domEvent: action, source: "overlay" },
+        domContext,
+        manual: {
+          id: `overlay-${Date.now()}`,
+          type: action,
+          resultName: null,
+          attributeName: null
+        }
+      });
+      if (selectors.length > 0) {
+        const primary = selectors[0];
+        eventRecord.primarySelector = primary.selector;
+        eventRecord.primarySelectorType = primary.type || "css";
+        eventRecord.primarySelectorText = primary.textValue || null;
+        eventRecord.primarySelectorXPath = primary.xpathValue || null;
+        eventRecord.primarySelectorMatchMode = primary.matchMode || null;
+      }
+      chrome.runtime.sendMessage({ type: "SAVE_EVENT", event: eventRecord }, () => {
+        if (chrome.runtime.lastError) {
+          setOverlayStatus("\uC774\uBCA4\uD2B8 \uC800\uC7A5 \uC2E4\uD328: " + chrome.runtime.lastError.message, "error");
+          return;
+        }
+        setOverlayStatus(`${action} \uC561\uC158\uC744 \uAE30\uB85D\uD588\uC2B5\uB2C8\uB2E4.`, "success");
+        setTimeout(() => {
+          setOverlayStatus("", "info");
+        }, 2e3);
+      });
+    } catch (error) {
+      console.error("[Overlay] Failed to record action:", error);
+      setOverlayStatus("\uC561\uC158 \uAE30\uB85D \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC2B5\uB2C8\uB2E4.", "error");
+    }
   }
 
   // src/content/selection/index.js
@@ -2357,75 +2582,6 @@
     return handleParentSelection();
   }
 
-  // src/content/events/schema.js
-  var EVENT_SCHEMA_VERSION = 2;
-  function buildPrimarySelectorData(selectors) {
-    if (!Array.isArray(selectors) || selectors.length === 0) return {};
-    const primary = selectors[0];
-    if (!primary || !primary.selector) return {};
-    const type = primary.type || inferSelectorType(primary.selector);
-    return {
-      primarySelector: primary.selector,
-      primarySelectorType: type,
-      primarySelectorText: primary.textValue || null,
-      primarySelectorXPath: primary.xpathValue || null,
-      primarySelectorMatchMode: primary.matchMode || null
-    };
-  }
-  function createEventRecord({
-    action,
-    value = null,
-    selectors = [],
-    target = null,
-    domContext = null,
-    iframeContext = null,
-    clientRect = null,
-    metadata = {},
-    manual
-  }) {
-    const timestamp = Date.now();
-    const targetTag = target && target.tagName ? target.tagName : null;
-    const selectorCandidates = Array.isArray(selectors) ? selectors : [];
-    const primaryData = buildPrimarySelectorData(selectorCandidates);
-    const positionInfo = target ? getElementPositionInfo(target) : null;
-    return {
-      version: EVENT_SCHEMA_VERSION,
-      timestamp,
-      action,
-      value,
-      tag: targetTag,
-      selectorCandidates,
-      iframeContext,
-      page: {
-        // 이벤트가 발생한 페이지의 URL/타이틀을 저장해 재현에 도움을 준다.
-        url: window.location.href,
-        title: document.title
-      },
-      frame: {
-        iframeContext
-      },
-      target: target ? {
-        tag: targetTag,
-        id: target.id || null,
-        classes: target.classList ? Array.from(target.classList) : [],
-        text: (target.innerText || target.textContent || "").trim().slice(0, 200),
-        childCount: target.children ? target.children.length : 0,
-        position: positionInfo,
-        repeats: positionInfo ? positionInfo.total > 1 : false,
-        domContext
-      } : null,
-      clientRect,
-      metadata: {
-        schemaVersion: EVENT_SCHEMA_VERSION,
-        userAgent: navigator.userAgent,
-        ...metadata
-      },
-      manual: manual || null,
-      // primary selector 관련 필드들을 최상위에 병합한다.
-      ...primaryData
-    };
-  }
-
   // src/content/recorder/index.js
   var INPUT_DEBOUNCE_DELAY = 800;
   function persistEvent(eventRecord) {
@@ -2551,24 +2707,6 @@
     }
     recordDomEvent({ action: "rightClick", target });
   }
-  function handleHover(event) {
-    if (!recorderState.isRecording) return;
-    if (elementSelectionState.mode) return;
-    const target = event.target;
-    if (!target || target === document.body || target === document.documentElement) return;
-    if (target.id === "__ai_test_recorder_overlay__" || target.closest && target.closest("#__ai_test_recorder_overlay__")) {
-      return;
-    }
-    const existingTimer = inputTimers.get(target);
-    if (existingTimer) {
-      return;
-    }
-    const timer = setTimeout(() => {
-      recordDomEvent({ action: "hover", target });
-      inputTimers.delete(target);
-    }, 300);
-    inputTimers.set(target, timer);
-  }
   function handleSelect(event) {
     if (!recorderState.isRecording) return;
     if (elementSelectionState.mode) return;
@@ -2683,13 +2821,6 @@
         handleRightClick(event);
       } catch (err) {
         console.error("[AI Test Recorder] Failed to handle right click event:", err);
-      }
-    }, true);
-    document.addEventListener("mouseenter", (event) => {
-      try {
-        handleHover(event);
-      } catch (err) {
-        console.error("[AI Test Recorder] Failed to handle hover event:", err);
       }
     }, true);
     window.addEventListener("popstate", () => {

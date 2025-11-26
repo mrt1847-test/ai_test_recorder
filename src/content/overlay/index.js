@@ -7,6 +7,7 @@
 import { getSelectorCandidates, getIframeContext } from '../selectors/index.js';
 import { elementSelectionState, overlayControlsState, recorderState } from '../state.js';
 import { buildDomContextSnapshot } from '../utils/dom.js';
+import { createEventRecord } from '../events/schema.js';
 
 /**
  * 현재 오버레이 위치를 저장해 새로고침 후에도 동일 위치를 유지한다.
@@ -32,6 +33,10 @@ export function updateOverlayControlsState() {
   if (!overlayControlsState.buttons.start || !overlayControlsState.container) return;
   overlayControlsState.buttons.start.disabled = !!recorderState.isRecording;
   overlayControlsState.buttons.stop.disabled = !recorderState.isRecording;
+  // Action 버튼은 녹화 중이고 하이라이트된 요소가 있을 때만 활성화
+  if (overlayControlsState.buttons.action) {
+    overlayControlsState.buttons.action.disabled = !recorderState.isRecording || !recorderState.currentHighlightedElement;
+  }
   overlayControlsState.container.toggleAttribute('data-selecting', !!elementSelectionState.mode);
 }
 
@@ -238,9 +243,97 @@ export function createOverlayControls() {
     sendOverlayCommand('element_select');
   });
 
+  // Action 드롭다운 컨테이너
+  const actionContainer = document.createElement('div');
+  actionContainer.style.cssText = 'position:relative;flex:1 1 auto;';
+  
+  const actionBtn = document.createElement('button');
+  actionBtn.textContent = 'Action ▼';
+  actionBtn.style.cssText = buttonStyle;
+  actionBtn.disabled = true;
+  
+  const actionMenu = document.createElement('div');
+  actionMenu.style.cssText = `
+    position:absolute;
+    bottom:100%;
+    left:0;
+    margin-bottom:4px;
+    background:rgba(15,23,42,0.95);
+    backdrop-filter:blur(12px);
+    border:1px solid rgba(255,255,255,0.18);
+    border-radius:8px;
+    padding:4px;
+    min-width:140px;
+    max-height:200px;
+    overflow-y:auto;
+    display:none;
+    z-index:1000;
+    box-shadow:0 8px 24px rgba(11,15,25,0.4);
+  `;
+  
+  const actionOptions = [
+    { value: 'click', label: '클릭' },
+    { value: 'doubleClick', label: '더블 클릭' },
+    { value: 'rightClick', label: '우클릭' },
+    { value: 'hover', label: '호버' },
+    { value: 'type', label: '입력' },
+    { value: 'clear', label: '입력 필드 비우기' },
+    { value: 'select', label: '드롭다운 선택' }
+  ];
+  
+  actionOptions.forEach(option => {
+    const optionBtn = document.createElement('button');
+    optionBtn.textContent = option.label;
+    optionBtn.setAttribute('data-action', option.value);
+    optionBtn.style.cssText = `
+      display:block;
+      width:100%;
+      padding:8px 10px;
+      text-align:left;
+      border:none;
+      background:transparent;
+      color:#fff;
+      font-size:12px;
+      cursor:pointer;
+      border-radius:4px;
+      transition:background 0.15s ease;
+    `;
+    optionBtn.addEventListener('mouseenter', () => {
+      optionBtn.style.background = 'rgba(255,255,255,0.15)';
+    });
+    optionBtn.addEventListener('mouseleave', () => {
+      optionBtn.style.background = 'transparent';
+    });
+    optionBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const action = optionBtn.getAttribute('data-action');
+      handleOverlayAction(action);
+      actionMenu.style.display = 'none';
+    });
+    actionMenu.appendChild(optionBtn);
+  });
+  
+  actionBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (actionBtn.disabled) return;
+    const isVisible = actionMenu.style.display === 'block';
+    actionMenu.style.display = isVisible ? 'none' : 'block';
+  });
+  
+  // 외부 클릭 시 메뉴 닫기
+  document.addEventListener('click', (e) => {
+    if (!actionContainer.contains(e.target)) {
+      actionMenu.style.display = 'none';
+    }
+  }, true);
+  
+  actionContainer.appendChild(actionBtn);
+  actionContainer.appendChild(actionMenu);
+
   buttonsRow.appendChild(startBtn);
   buttonsRow.appendChild(stopBtn);
   buttonsRow.appendChild(selectBtn);
+  buttonsRow.appendChild(actionContainer);
 
   const status = document.createElement('div');
   status.style.marginTop = '10px';
@@ -264,7 +357,8 @@ export function createOverlayControls() {
 
   overlayControlsState.container = container;
   overlayControlsState.handle = handle;
-  overlayControlsState.buttons = { start: startBtn, stop: stopBtn, select: selectBtn };
+  overlayControlsState.buttons = { start: startBtn, stop: stopBtn, select: selectBtn, action: actionBtn };
+  overlayControlsState.actionMenu = actionMenu;
   overlayControlsState.status = status;
   overlayControlsState.closeButton = closeBtn;
   overlayControlsState.visible = false;
@@ -405,6 +499,8 @@ export function removeHighlight() {
     recorderState.overlayElement.remove();
     recorderState.overlayElement = null;
   }
+  // Action 버튼 상태 업데이트
+  updateOverlayControlsState();
 }
 
 /**
@@ -481,6 +577,9 @@ export function highlightElement(element) {
   const selectors = getSelectorCandidates(element);
   const rect = element.getBoundingClientRect();
   createSelectorOverlay(rect, selectors);
+
+  // Action 버튼 상태 업데이트
+  updateOverlayControlsState();
 
   if (!isSameElement) {
     // DevTools 패널에 hover된 요소 정보를 전송해 UI를 동기화한다.
@@ -580,6 +679,95 @@ export function initOverlaySystem() {
 export function ensureRecordingState(isRecording) {
   recorderState.isRecording = isRecording;
   updateOverlayControlsState();
+}
+
+/**
+ * 오버레이에서 선택한 action을 현재 하이라이트된 요소에 적용
+ */
+function handleOverlayAction(action) {
+  if (!recorderState.isRecording) {
+    setOverlayStatus('녹화 중이 아닙니다.', 'error');
+    return;
+  }
+  
+  const element = recorderState.currentHighlightedElement;
+  if (!element) {
+    setOverlayStatus('요소를 먼저 선택하세요. (마우스를 요소 위에 올려보세요)', 'error');
+    return;
+  }
+  
+  // type, select 액션은 추가 입력이 필요할 수 있음
+  if (action === 'type') {
+    const inputValue = prompt('입력할 텍스트를 입력하세요:');
+    if (inputValue === null) return; // 취소
+    recordOverlayAction(action, element, inputValue);
+  } else if (action === 'select') {
+    const selectValue = prompt('선택할 옵션의 텍스트 또는 값을 입력하세요:');
+    if (selectValue === null) return; // 취소
+    recordOverlayAction(action, element, selectValue);
+  } else {
+    recordOverlayAction(action, element, null);
+  }
+}
+
+/**
+ * 오버레이에서 선택한 action을 이벤트로 기록
+ */
+function recordOverlayAction(action, target, value) {
+  try {
+    const selectors = getSelectorCandidates(target) || [];
+    const iframeContext = getIframeContext(target);
+    const clientRect = target.getBoundingClientRect ? {
+      x: Math.round(target.getBoundingClientRect().x || 0),
+      y: Math.round(target.getBoundingClientRect().y || 0),
+      w: Math.round(target.getBoundingClientRect().width || 0),
+      h: Math.round(target.getBoundingClientRect().height || 0)
+    } : { x: 0, y: 0, w: 0, h: 0 };
+    const domContext = buildDomContextSnapshot(target, { includeSelf: true });
+    
+    const eventRecord = createEventRecord({
+      action,
+      value,
+      selectors,
+      target,
+      iframeContext,
+      clientRect,
+      metadata: { domEvent: action, source: 'overlay' },
+      domContext,
+      manual: {
+        id: `overlay-${Date.now()}`,
+        type: action,
+        resultName: null,
+        attributeName: null
+      }
+    });
+    
+    // primary selector 설정
+    if (selectors.length > 0) {
+      const primary = selectors[0];
+      eventRecord.primarySelector = primary.selector;
+      eventRecord.primarySelectorType = primary.type || 'css';
+      eventRecord.primarySelectorText = primary.textValue || null;
+      eventRecord.primarySelectorXPath = primary.xpathValue || null;
+      eventRecord.primarySelectorMatchMode = primary.matchMode || null;
+    }
+    
+    // 이벤트 저장
+    chrome.runtime.sendMessage({ type: 'SAVE_EVENT', event: eventRecord }, () => {
+      if (chrome.runtime.lastError) {
+        setOverlayStatus('이벤트 저장 실패: ' + chrome.runtime.lastError.message, 'error');
+        return;
+      }
+      setOverlayStatus(`${action} 액션을 기록했습니다.`, 'success');
+      // 하이라이트 유지
+      setTimeout(() => {
+        setOverlayStatus('', 'info');
+      }, 2000);
+    });
+  } catch (error) {
+    console.error('[Overlay] Failed to record action:', error);
+    setOverlayStatus('액션 기록 중 오류가 발생했습니다.', 'error');
+  }
 }
 
 /**

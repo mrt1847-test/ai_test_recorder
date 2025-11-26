@@ -26,10 +26,9 @@ const waitActionsContainer = document.getElementById('wait-actions');
 const waitInputPanel = document.getElementById('wait-input-panel');
 const waitTimeInput = document.getElementById('wait-time-input');
 const waitTimeApplyBtn = document.getElementById('wait-time-apply');
-const verifyBtn = document.getElementById('verify-btn');
-const waitBtn = document.getElementById('wait-btn');
 const interactionActionsContainer = document.getElementById('interaction-actions');
-const interactionBtn = document.getElementById('interaction-btn');
+const actionBtn = document.getElementById('action-btn');
+const actionMenu = document.getElementById('action-menu');
 const interactionTypeInput = document.getElementById('interaction-type-input');
 const interactionTypeApplyBtn = document.getElementById('interaction-type-apply');
 const aiEndpointInput = document.getElementById('ai-endpoint');
@@ -1045,53 +1044,38 @@ if (elementSelectBtn) {
   });
 }
 
-if (verifyBtn) {
-  verifyBtn.addEventListener('click', () => {
-    // verify 액션 패널 표시
-    if (verifyActionsContainer) {
-      verifyActionsContainer.classList.remove('hidden');
-    }
-    if (waitActionsContainer) {
-      waitActionsContainer.classList.add('hidden');
-    }
-    if (elementPanel) {
-      elementPanel.classList.remove('hidden');
+// 통합 Action 메뉴 처리
+if (actionBtn && actionMenu) {
+  actionBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    actionMenu.classList.toggle('hidden');
+  });
+  
+  // 메뉴 외부 클릭 시 닫기
+  document.addEventListener('click', (e) => {
+    if (actionBtn && actionMenu && 
+        !actionBtn.contains(e.target) && 
+        !actionMenu.contains(e.target)) {
+      actionMenu.classList.add('hidden');
     }
   });
-}
-
-if (waitBtn) {
-  waitBtn.addEventListener('click', () => {
-    // wait 액션 패널 표시
-    if (waitActionsContainer) {
-      waitActionsContainer.classList.remove('hidden');
-    }
-    if (verifyActionsContainer) {
-      verifyActionsContainer.classList.add('hidden');
-    }
-    if (interactionActionsContainer) {
-      interactionActionsContainer.classList.add('hidden');
-    }
-    if (elementPanel) {
-      elementPanel.classList.remove('hidden');
-    }
-  });
-}
-
-if (interactionBtn) {
-  interactionBtn.addEventListener('click', () => {
-    // 상호작용 액션 패널 표시
-    if (interactionActionsContainer) {
-      interactionActionsContainer.classList.remove('hidden');
-    }
-    if (verifyActionsContainer) {
-      verifyActionsContainer.classList.add('hidden');
-    }
-    if (waitActionsContainer) {
-      waitActionsContainer.classList.add('hidden');
-    }
-    if (elementPanel) {
-      elementPanel.classList.remove('hidden');
+  
+  // 액션 선택 처리
+  actionMenu.addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-action-type]');
+    if (!button) return;
+    
+    const actionType = button.getAttribute('data-action-type');
+    const action = button.getAttribute('data-action');
+    
+    actionMenu.classList.add('hidden');
+    
+    if (actionType === 'interaction') {
+      handleInteractionAction(action);
+    } else if (actionType === 'verify') {
+      handleVerifyAction(action);
+    } else if (actionType === 'wait') {
+      handleWaitAction(action);
     }
   });
 }

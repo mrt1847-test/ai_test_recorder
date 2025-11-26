@@ -10,7 +10,8 @@
     "tabs"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "http://localhost:3000/*"
   ],
   "devtools_page": "devtools.html",
   "action": {
@@ -29,5 +30,11 @@
       "resources": ["popup.html", "popup.js", "style.css", "vendor/**/*"],
       "matches": ["<all_urls>"]
     }
-  ]
+  ],
+  "externally_connectable": {
+    "matches": [
+      "http://localhost:*/*",
+      "https://*/*"
+    ]
+  }
 }

@@ -21,6 +21,14 @@ const elementCodePreview = document.getElementById('element-code-preview');
 const elementCodeEl = document.getElementById('element-code');
 const elementCancelBtn = document.getElementById('element-cancel-btn');
 const overlayToggleBtn = document.getElementById('overlay-toggle-btn');
+const verifyActionsContainer = document.getElementById('verify-actions');
+const waitActionsContainer = document.getElementById('wait-actions');
+const waitInputPanel = document.getElementById('wait-input-panel');
+const waitTimeInput = document.getElementById('wait-time-input');
+const waitTimeApplyBtn = document.getElementById('wait-time-apply');
+const interactionActionsContainer = document.getElementById('interaction-actions');
+const actionBtn = document.getElementById('action-btn');
+const actionMenu = document.getElementById('action-menu');
 const aiEndpointInput = document.getElementById('ai-endpoint');
 const aiApiKeyInput = document.getElementById('ai-api-key');
 const aiModelInput = document.getElementById('ai-model');
@@ -32,6 +40,9 @@ const aiReviewStatusEl = document.getElementById('ai-review-status');
 const aiReviewHelpEl = document.getElementById('ai-review-help');
 const codeReviewSummaryEl = document.getElementById('code-review-summary');
 const codeReviewDiffEl = document.getElementById('code-review-diff');
+const sendRecordingBtn = document.getElementById('send-recording-btn');
+const tcIdInput = document.getElementById('tc-id-input');
+const projectIdInput = document.getElementById('project-id-input');
 let recording = false;
 let selectedFramework = 'playwright';
 let selectedLanguage = 'python';
@@ -1023,6 +1034,12 @@ stopBtn.addEventListener('click', ()=>{
   triggerStopRecording({source: 'panel'});
 });
 
+if (sendRecordingBtn) {
+  sendRecordingBtn.addEventListener('click', () => {
+    handleSendRecording();
+  });
+}
+
 resetBtn.addEventListener('click', () => {
   // 전체 삭제
   chrome.storage.local.clear(() => {
@@ -1070,6 +1087,42 @@ if (elementSelectBtn) {
   });
 }
 
+// 통합 Action 메뉴 처리
+if (actionBtn && actionMenu) {
+  actionBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    actionMenu.classList.toggle('hidden');
+  });
+  
+  // 메뉴 외부 클릭 시 닫기
+  document.addEventListener('click', (e) => {
+    if (actionBtn && actionMenu && 
+        !actionBtn.contains(e.target) && 
+        !actionMenu.contains(e.target)) {
+      actionMenu.classList.add('hidden');
+    }
+  });
+  
+  // 액션 선택 처리
+  actionMenu.addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-action-type]');
+    if (!button) return;
+    
+    const actionType = button.getAttribute('data-action-type');
+    const action = button.getAttribute('data-action');
+    
+    actionMenu.classList.add('hidden');
+    
+    if (actionType === 'interaction') {
+      handleInteractionAction(action);
+    } else if (actionType === 'verify') {
+      handleVerifyAction(action);
+    } else if (actionType === 'wait') {
+      handleWaitAction(action);
+    }
+  });
+}
+
 if (overlayToggleBtn) {
   overlayToggleBtn.addEventListener('click', () => {
     requestOverlayVisibility(!overlayVisible, { revert: true });
@@ -1096,6 +1149,47 @@ if (elementAttrApplyBtn) {
     const attrName = elementAttrNameInput ? elementAttrNameInput.value.trim() : '';
     selectionState.pendingAttribute = attrName;
     applySelectionAction('get_attribute', {attributeName: attrName});
+  });
+}
+
+// Verify 액션 처리
+if (verifyActionsContainer) {
+  verifyActionsContainer.addEventListener('click', (event) => {
+    const button = event.target && event.target.closest('button[data-verify]');
+    if (!button) return;
+    const verifyType = button.getAttribute('data-verify');
+    handleVerifyAction(verifyType);
+  });
+}
+
+// Wait 액션 처리
+if (waitActionsContainer) {
+  waitActionsContainer.addEventListener('click', (event) => {
+    const button = event.target && event.target.closest('button[data-wait]');
+    if (!button) return;
+    const waitType = button.getAttribute('data-wait');
+    handleWaitAction(waitType);
+  });
+}
+
+if (waitTimeApplyBtn) {
+  waitTimeApplyBtn.addEventListener('click', () => {
+    const timeValue = waitTimeInput ? waitTimeInput.value.trim() : '';
+    if (!timeValue || isNaN(parseInt(timeValue))) {
+      alert('올바른 대기 시간을 입력하세요 (밀리초)');
+      return;
+    }
+    addWaitAction('wait', parseInt(timeValue));
+  });
+}
+
+// 상호작용 액션 처리
+if (interactionActionsContainer) {
+  interactionActionsContainer.addEventListener('click', (event) => {
+    const button = event.target && event.target.closest('button[data-interaction]');
+    if (!button) return;
+    const interactionType = button.getAttribute('data-interaction');
+    handleInteractionAction(interactionType);
   });
 }
 
@@ -3270,6 +3364,876 @@ function buildManualActionEntry(actionType, path, options = {}) {
   return entry;
 }
 
+/**
+ * ExtensionEvent 형식으로 변환 및 키워드 기반 TC 스텝 생성 함수들
+ */
+
+/**
+ * DOM 경로 생성 헬퍼
+ * @param {object} event - 이벤트 객체
+ * @returns {string|undefined} DOM 경로 문자열
+ */
+function buildDomPathFromEvent(event) {
+  if (!event || !event.target) {
+    return undefined;
+  }
+  
+  // target.domContext가 있으면 사용
+  if (event.target.domContext) {
+    // domContext가 문자열이면 그대로 반환
+    if (typeof event.target.domContext === 'string') {
+      return event.target.domContext;
+    }
+    // 객체면 경로를 구성
+    if (typeof event.target.domContext === 'object') {
+      // 간단한 경로 구성 (실제 구현은 domContext 구조에 따라 달라질 수 있음)
+      const parts = [];
+      if (event.target.tag) {
+        parts.push(event.target.tag.toLowerCase());
+      }
+      if (event.target.id) {
+        parts.push(`#${event.target.id}`);
+      }
+      if (event.target.classes && event.target.classes.length > 0) {
+        parts.push(`.${event.target.classes[0]}`);
+      }
+      return parts.length > 0 ? parts.join('') : undefined;
+    }
+  }
+  
+  // primarySelector를 기반으로 경로 추정
+  if (event.primarySelector) {
+    return event.primarySelector;
+  }
+  
+  return undefined;
+}
+
+/**
+ * 현재 이벤트를 ExtensionEvent 형식으로 변환
+ * @param {object} event - 현재 이벤트 객체
+ * @param {object} selectorInfo - 셀렉터 정보
+ * @returns {object} ExtensionEvent 형식 객체
+ */
+function convertToElectronFormat(event, selectorInfo) {
+  if (!event) return null;
+  
+  // target 셀렉터 결정
+  const target = event.primarySelector || 
+    (selectorInfo?.selector) ||
+    (event.selectorCandidates?.[0]?.selector) || 
+    '';
+  
+  // alternativeSelectors 생성
+  const alternativeSelectors = (event.selectorCandidates || [])
+    .slice(1) // 첫 번째는 target이므로 제외
+    .map(c => c && c.selector ? c.selector : null)
+    .filter(Boolean);
+  
+  // uniqueness 계산
+  let uniqueness = 'not-found';
+  if (event.target) {
+    if (event.target.repeats === false) {
+      uniqueness = 'unique';
+    } else if (event.target.repeats === true) {
+      uniqueness = 'multiple';
+    }
+  } else if (target) {
+    // 셀렉터가 있으면 기본적으로 unique로 가정 (실제 검증 필요)
+    uniqueness = 'unique';
+  }
+  
+  // DOM 경로 생성
+  const domPath = buildDomPathFromEvent(event);
+  
+  // action 매핑 (input -> type)
+  let action = event.action;
+  if (action === 'input') {
+    action = 'type';
+  }
+  
+  // selectorType 결정
+  const selectorType = event.primarySelectorType || 
+    selectorInfo?.type || 
+    (target.startsWith('//') || target.startsWith('(') ? 'xpath' : 
+     target.startsWith('text=') ? 'text' : 'css');
+  
+  return {
+    action: action,
+    timestamp: event.timestamp || Date.now(),
+    target: target,
+    alternativeSelectors: alternativeSelectors,
+    selectorType: selectorType,
+    uniqueness: uniqueness,
+    value: event.value !== undefined && event.value !== null ? String(event.value) : undefined,
+    url: event.page?.url || undefined,
+    title: event.page?.title || undefined,
+    domPath: domPath || undefined,
+    description: undefined,
+    screenshot: undefined
+  };
+}
+
+/**
+ * Electron 형식 이벤트를 키워드 스텝으로 변환
+ * @param {object} electronEvent - ExtensionEvent 형식 객체
+ * @param {number} stepNumber - 스텝 번호
+ * @returns {object|null} 키워드 스텝 객체
+ */
+function convertEventToKeywordStep(electronEvent, stepNumber) {
+  if (!electronEvent || !electronEvent.action) {
+    return null;
+  }
+  
+  const step = {
+    stepNumber: stepNumber,
+    keyword: electronEvent.action,
+    timestamp: electronEvent.timestamp,
+    args: [],
+    metadata: {}
+  };
+  
+  // action별 인자 구성
+  switch (electronEvent.action) {
+    case 'goto':
+    case 'open':
+      step.args = [electronEvent.target]; // URL
+      step.metadata = {
+        url: electronEvent.url,
+        title: electronEvent.title
+      };
+      break;
+      
+    case 'click':
+      step.args = [electronEvent.target];
+      step.metadata = {
+        selectorType: electronEvent.selectorType,
+        uniqueness: electronEvent.uniqueness,
+        alternativeSelectors: electronEvent.alternativeSelectors,
+        domPath: electronEvent.domPath,
+        url: electronEvent.url
+      };
+      break;
+      
+    case 'type':
+    case 'setText':
+      step.args = [electronEvent.target];
+      if (electronEvent.value) {
+        step.args.push(electronEvent.value);
+      }
+      step.metadata = {
+        selectorType: electronEvent.selectorType,
+        uniqueness: electronEvent.uniqueness,
+        alternativeSelectors: electronEvent.alternativeSelectors,
+        domPath: electronEvent.domPath,
+        url: electronEvent.url
+      };
+      break;
+      
+    case 'clear':
+      step.args = [electronEvent.target];
+      step.metadata = {
+        selectorType: electronEvent.selectorType,
+        uniqueness: electronEvent.uniqueness,
+        alternativeSelectors: electronEvent.alternativeSelectors,
+        url: electronEvent.url
+      };
+      break;
+      
+    case 'select':
+      step.args = [electronEvent.target];
+      if (electronEvent.value) {
+        step.args.push(electronEvent.value);
+      }
+      step.metadata = {
+        selectorType: electronEvent.selectorType,
+        uniqueness: electronEvent.uniqueness,
+        alternativeSelectors: electronEvent.alternativeSelectors,
+        url: electronEvent.url
+      };
+      break;
+      
+    case 'hover':
+    case 'doubleClick':
+    case 'rightClick':
+      step.args = [electronEvent.target];
+      step.metadata = {
+        selectorType: electronEvent.selectorType,
+        uniqueness: electronEvent.uniqueness,
+        alternativeSelectors: electronEvent.alternativeSelectors,
+        url: electronEvent.url
+      };
+      break;
+      
+    case 'verifyText':
+      step.args = [electronEvent.target];
+      if (electronEvent.value) {
+        step.args.push(electronEvent.value);
+      }
+      step.metadata = {
+        selectorType: electronEvent.selectorType,
+        uniqueness: electronEvent.uniqueness,
+        url: electronEvent.url
+      };
+      break;
+      
+    case 'verifyElementPresent':
+    case 'verifyElementNotPresent':
+      step.args = [electronEvent.target];
+      step.metadata = {
+        selectorType: electronEvent.selectorType,
+        uniqueness: electronEvent.uniqueness,
+        url: electronEvent.url
+      };
+      break;
+      
+    case 'verifyTitle':
+      step.args = [];
+      if (electronEvent.value) {
+        step.args.push(electronEvent.value); // 타이틀 텍스트
+      }
+      step.metadata = {
+        url: electronEvent.url
+      };
+      break;
+      
+    case 'verifyUrl':
+      step.args = [];
+      if (electronEvent.value) {
+        step.args.push(electronEvent.value); // URL
+      }
+      step.metadata = {};
+      break;
+      
+    case 'waitForElement':
+      step.args = [electronEvent.target];
+      if (electronEvent.value) {
+        step.args.push(electronEvent.value); // 대기 시간
+      }
+      step.metadata = {
+        selectorType: electronEvent.selectorType,
+        url: electronEvent.url
+      };
+      break;
+      
+    case 'wait':
+    case 'sleep':
+      step.args = [];
+      if (electronEvent.value) {
+        step.args.push(electronEvent.value); // 대기 시간
+      }
+      step.metadata = {
+        url: electronEvent.url
+      };
+      break;
+      
+    default:
+      // 알 수 없는 action은 그대로 전달
+      step.args = electronEvent.target ? [electronEvent.target] : [];
+      if (electronEvent.value) {
+        step.args.push(electronEvent.value);
+      }
+      step.metadata = {
+        selectorType: electronEvent.selectorType,
+        uniqueness: electronEvent.uniqueness,
+        url: electronEvent.url
+      };
+  }
+  
+  // description이 있으면 추가
+  if (electronEvent.description) {
+    step.description = electronEvent.description;
+  }
+  
+  return step;
+}
+
+/**
+ * 수동 액션을 키워드 스텝으로 변환
+ * @param {object} action - 수동 액션 객체
+ * @param {number} stepNumber - 스텝 번호
+ * @returns {object|null} 키워드 스텝 객체
+ */
+function convertManualActionToKeywordStep(action, stepNumber) {
+  if (!action || !Array.isArray(action.path) || !action.path.length) {
+    return null;
+  }
+  
+  const lastPathItem = action.path[action.path.length - 1];
+  const selector = lastPathItem?.selector || '';
+  
+  const step = {
+    stepNumber: stepNumber,
+    keyword: action.actionType || 'click',
+    timestamp: action.createdAt || Date.now(),
+    args: [selector],
+    metadata: {
+      manual: true,
+      actionType: action.actionType
+    }
+  };
+  
+  if (action.actionType === 'extract_text') {
+    step.keyword = 'extractText';
+    if (action.resultName) {
+      step.metadata.resultName = action.resultName;
+    }
+  } else if (action.actionType === 'get_attribute') {
+    step.keyword = 'getAttribute';
+    if (action.attributeName) {
+      step.args.push(action.attributeName);
+    }
+    if (action.resultName) {
+      step.metadata.resultName = action.resultName;
+    }
+  }
+  
+  return step;
+}
+
+/**
+ * Timeline을 키워드 기반 TC 스텝 배열로 변환
+ * @param {Array} timeline - buildActionTimeline() 결과
+ * @returns {Array} 키워드 기반 TC 스텝 배열
+ */
+function generateKeywordBasedSteps(timeline) {
+  if (!Array.isArray(timeline)) {
+    return [];
+  }
+  
+  const steps = [];
+  
+  timeline.forEach((entry, index) => {
+    if (entry.kind === 'event') {
+      const { event, selectorInfo } = entry;
+      const electronEvent = convertToElectronFormat(event, selectorInfo);
+      if (electronEvent) {
+        const step = convertEventToKeywordStep(electronEvent, steps.length + 1);
+        if (step) {
+          steps.push(step);
+        }
+      }
+    } else if (entry.kind === 'manual') {
+      const step = convertManualActionToKeywordStep(entry.action, steps.length + 1);
+      if (step) {
+        steps.push(step);
+      }
+    }
+  });
+  
+  return steps;
+}
+
+/**
+ * 키워드 기반 TC를 JSON 형식으로 내보내기
+ * @param {string} testCaseName - 테스트 케이스 이름
+ * @param {Function} callback - 콜백 함수 (jsonString, steps) => void
+ */
+function exportKeywordBasedTC(testCaseName, callback) {
+  chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
+    const events = (res && res.events) || [];
+    const normalizedEvents = events.map(normalizeEventRecord);
+    
+    loadManualActions((manualActions) => {
+      const timeline = buildActionTimeline(normalizedEvents, manualActions);
+      const keywordSteps = generateKeywordBasedSteps(timeline);
+      
+      const testCase = {
+        name: testCaseName || 'Recorded Test Case',
+        steps: keywordSteps,
+        metadata: {
+          createdAt: Date.now(),
+          totalSteps: keywordSteps.length,
+          version: '1.0'
+        }
+      };
+      
+      const json = JSON.stringify(testCase, null, 2);
+      
+      if (callback) {
+        callback(json, keywordSteps);
+      }
+    });
+  });
+}
+
+/**
+ * Verify 액션 추가
+ */
+function handleVerifyAction(verifyType) {
+  if (verifyType === 'verifyTitle' || verifyType === 'verifyUrl') {
+    // 타이틀/URL 검증은 요소 선택 불필요
+    addVerifyAction(verifyType, null, null);
+    return;
+  }
+  
+  // 요소 검증은 요소 선택 필요
+  const path = buildSelectionPathArray();
+  if (!path.length) {
+    // 요소 선택 모드로 전환
+    if (!selectionState.active) {
+      startElementSelection();
+    }
+    setElementStatus('검증할 요소를 선택하세요.', 'info');
+    // verify 액션을 pending으로 설정
+    selectionState.pendingAction = verifyType;
+    if (verifyActionsContainer) {
+      verifyActionsContainer.classList.add('hidden');
+    }
+    if (elementActionsContainer) {
+      elementActionsContainer.classList.remove('hidden');
+    }
+    return;
+  }
+  
+  let value = null;
+  if (verifyType === 'verifyText') {
+    // 텍스트 검증은 현재 요소의 텍스트를 가져와야 함
+    const lastPathItem = path[path.length - 1];
+    if (lastPathItem && lastPathItem.textValue) {
+      value = lastPathItem.textValue;
+    } else {
+      // 사용자에게 텍스트 입력 요청
+      const textValue = prompt('검증할 텍스트를 입력하세요:');
+      if (textValue === null) return; // 취소
+      value = textValue;
+    }
+  }
+  
+  addVerifyAction(verifyType, path, value);
+}
+
+/**
+ * Wait 액션 추가
+ */
+function handleWaitAction(waitType) {
+  if (waitType === 'wait') {
+    // 시간 대기는 입력 패널 표시
+    if (waitInputPanel) {
+      waitInputPanel.classList.remove('hidden');
+    }
+    if (waitTimeInput) {
+      waitTimeInput.focus();
+    }
+    return;
+  }
+  
+  if (waitType === 'waitForElement') {
+    // 요소 대기는 요소 선택 필요
+    const path = buildSelectionPathArray();
+    if (!path.length) {
+      // 요소 선택 모드로 전환
+      if (!selectionState.active) {
+        startElementSelection();
+      }
+      setElementStatus('대기할 요소를 선택하세요.', 'info');
+      selectionState.pendingAction = 'waitForElement';
+      if (waitActionsContainer) {
+        waitActionsContainer.classList.add('hidden');
+      }
+      if (elementActionsContainer) {
+        elementActionsContainer.classList.remove('hidden');
+      }
+      return;
+    }
+    
+    addWaitAction('waitForElement', null, path);
+  }
+}
+
+/**
+ * 상호작용 액션 추가
+ */
+function handleInteractionAction(interactionType) {
+  const path = buildSelectionPathArray();
+  
+  // type, clear, select는 입력값이 필요할 수 있음
+  if (interactionType === 'type') {
+    if (!path.length) {
+      // 요소 선택 모드로 전환
+      if (!selectionState.active) {
+        startElementSelection();
+      }
+      setElementStatus('입력할 요소를 선택하세요.', 'info');
+      selectionState.pendingAction = 'type';
+      if (interactionActionsContainer) {
+        interactionActionsContainer.classList.add('hidden');
+      }
+      if (elementActionsContainer) {
+        elementActionsContainer.classList.remove('hidden');
+      }
+      return;
+    }
+    // 입력값 요청
+    const inputValue = prompt('입력할 텍스트를 입력하세요:');
+    if (inputValue === null) return; // 취소
+    addInteractionAction('type', path, inputValue);
+    return;
+  }
+  
+  if (interactionType === 'select') {
+    if (!path.length) {
+      if (!selectionState.active) {
+        startElementSelection();
+      }
+      setElementStatus('선택할 드롭다운 요소를 선택하세요.', 'info');
+      selectionState.pendingAction = 'select';
+      if (interactionActionsContainer) {
+        interactionActionsContainer.classList.add('hidden');
+      }
+      if (elementActionsContainer) {
+        elementActionsContainer.classList.remove('hidden');
+      }
+      return;
+    }
+    // 선택값 요청
+    const selectValue = prompt('선택할 옵션의 텍스트 또는 값을 입력하세요:');
+    if (selectValue === null) return;
+    addInteractionAction('select', path, selectValue);
+    return;
+  }
+  
+  // click, doubleClick, rightClick, hover, clear는 요소만 필요
+  if (!path.length) {
+    if (!selectionState.active) {
+      startElementSelection();
+    }
+    setElementStatus(`${interactionType}할 요소를 선택하세요.`, 'info');
+    selectionState.pendingAction = interactionType;
+    if (interactionActionsContainer) {
+      interactionActionsContainer.classList.add('hidden');
+    }
+    if (elementActionsContainer) {
+      elementActionsContainer.classList.remove('hidden');
+    }
+    return;
+  }
+  
+  addInteractionAction(interactionType, path, null);
+}
+
+/**
+ * Verify 액션을 이벤트로 추가
+ */
+function addVerifyAction(verifyType, path, value) {
+  withActiveTab((tab) => {
+    const timestamp = Date.now();
+    const currentUrl = tab?.url || '';
+    const currentTitle = tab?.title || '';
+    let eventRecord = null;
+    
+    if (path && path.length > 0) {
+      // 요소 기반 검증
+      const selectors = path.map((item, idx) => {
+        if (!item || !item.selector) return null;
+        const type = item.type || inferSelectorType(item.selector);
+        return {
+          selector: item.selector,
+          type,
+          textValue: item.textValue || null,
+          xpathValue: item.xpathValue || null,
+          matchMode: item.matchMode || null,
+          score: idx === path.length - 1 ? 100 : 80
+        };
+      }).filter(Boolean);
+      
+      if (!selectors.length) {
+        alert('셀렉터를 찾을 수 없습니다.');
+        return;
+      }
+      
+      const targetEntry = selectors[selectors.length - 1];
+      const iframeContext = path[path.length - 1]?.iframeContext || null;
+      
+      eventRecord = {
+        version: EVENT_SCHEMA_VERSION,
+        timestamp,
+        action: verifyType,
+        value: value || null,
+        tag: null,
+        selectorCandidates: selectors,
+        iframeContext,
+        page: {
+          url: currentUrl,
+          title: currentTitle
+        },
+        frame: { iframeContext },
+        target: null,
+        clientRect: null,
+        metadata: {
+          schemaVersion: EVENT_SCHEMA_VERSION,
+          userAgent: navigator.userAgent
+        },
+        manual: {
+          id: `verify-${timestamp}`,
+          type: verifyType,
+          resultName: null,
+          attributeName: null
+        },
+        primarySelector: targetEntry.selector,
+        primarySelectorType: targetEntry.type,
+        primarySelectorText: targetEntry.textValue,
+        primarySelectorXPath: targetEntry.xpathValue,
+        primarySelectorMatchMode: targetEntry.matchMode
+      };
+    } else {
+      // 타이틀/URL 검증 (요소 불필요)
+      if (verifyType === 'verifyTitle') {
+        value = value || currentTitle;
+      } else if (verifyType === 'verifyUrl') {
+        value = value || currentUrl;
+      }
+      
+      eventRecord = {
+        version: EVENT_SCHEMA_VERSION,
+        timestamp,
+        action: verifyType,
+        value: value,
+        tag: null,
+        selectorCandidates: [],
+        iframeContext: null,
+        page: {
+          url: currentUrl,
+          title: currentTitle
+        },
+        frame: { iframeContext: null },
+        target: null,
+        clientRect: null,
+        metadata: {
+          schemaVersion: EVENT_SCHEMA_VERSION,
+          userAgent: navigator.userAgent
+        },
+        manual: {
+          id: `verify-${timestamp}`,
+          type: verifyType,
+          resultName: null,
+          attributeName: null
+        },
+        primarySelector: null,
+        primarySelectorType: null
+      };
+    }
+    
+    // 이벤트 저장
+    chrome.runtime.sendMessage({ type: 'SAVE_EVENT', event: eventRecord }, () => {
+      chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
+        const events = (res && res.events) || [];
+        allEvents = events.map(normalizeEventRecord);
+        updateCode({ preloadedEvents: allEvents });
+        refreshTimeline();
+      });
+    });
+    
+    if (verifyActionsContainer) {
+      verifyActionsContainer.classList.add('hidden');
+    }
+    setElementStatus(`${verifyType} 액션을 추가했습니다.`, 'success');
+  });
+}
+
+/**
+ * Wait 액션을 이벤트로 추가
+ */
+function addWaitAction(waitType, timeValue, path) {
+  withActiveTab((tab) => {
+    const timestamp = Date.now();
+    const currentUrl = tab?.url || '';
+    const currentTitle = tab?.title || '';
+    let eventRecord = null;
+    
+    if (waitType === 'wait') {
+      // 시간 대기
+      eventRecord = {
+        version: EVENT_SCHEMA_VERSION,
+        timestamp,
+        action: 'wait',
+        value: String(timeValue || 1000),
+        tag: null,
+        selectorCandidates: [],
+        iframeContext: null,
+        page: {
+          url: currentUrl,
+          title: currentTitle
+        },
+        frame: { iframeContext: null },
+        target: null,
+        clientRect: null,
+        metadata: {
+          schemaVersion: EVENT_SCHEMA_VERSION,
+          userAgent: navigator.userAgent
+        },
+        manual: {
+          id: `wait-${timestamp}`,
+          type: 'wait',
+          resultName: null,
+          attributeName: null
+        },
+        primarySelector: null,
+        primarySelectorType: null
+      };
+    } else if (waitType === 'waitForElement' && path && path.length > 0) {
+      // 요소 대기
+      const selectors = path.map((item, idx) => {
+        if (!item || !item.selector) return null;
+        const type = item.type || inferSelectorType(item.selector);
+        return {
+          selector: item.selector,
+          type,
+          textValue: item.textValue || null,
+          xpathValue: item.xpathValue || null,
+          matchMode: item.matchMode || null,
+          score: idx === path.length - 1 ? 100 : 80
+        };
+      }).filter(Boolean);
+      
+      if (!selectors.length) {
+        alert('셀렉터를 찾을 수 없습니다.');
+        return;
+      }
+      
+      const targetEntry = selectors[selectors.length - 1];
+      const iframeContext = path[path.length - 1]?.iframeContext || null;
+      
+      eventRecord = {
+        version: EVENT_SCHEMA_VERSION,
+        timestamp,
+        action: 'waitForElement',
+        value: timeValue ? String(timeValue) : null,
+        tag: null,
+        selectorCandidates: selectors,
+        iframeContext,
+        page: {
+          url: currentUrl,
+          title: currentTitle
+        },
+        frame: { iframeContext },
+        target: null,
+        clientRect: null,
+        metadata: {
+          schemaVersion: EVENT_SCHEMA_VERSION,
+          userAgent: navigator.userAgent
+        },
+        manual: {
+          id: `wait-${timestamp}`,
+          type: 'waitForElement',
+          resultName: null,
+          attributeName: null
+        },
+        primarySelector: targetEntry.selector,
+        primarySelectorType: targetEntry.type,
+        primarySelectorText: targetEntry.textValue,
+        primarySelectorXPath: targetEntry.xpathValue,
+        primarySelectorMatchMode: targetEntry.matchMode
+      };
+    } else {
+      alert('대기 액션을 생성할 수 없습니다.');
+      return;
+    }
+    
+    // 이벤트 저장
+    chrome.runtime.sendMessage({ type: 'SAVE_EVENT', event: eventRecord }, () => {
+      chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
+        const events = (res && res.events) || [];
+        allEvents = events.map(normalizeEventRecord);
+        updateCode({ preloadedEvents: allEvents });
+        refreshTimeline();
+      });
+    });
+    
+    if (waitInputPanel) {
+      waitInputPanel.classList.add('hidden');
+    }
+    if (waitActionsContainer) {
+      waitActionsContainer.classList.add('hidden');
+    }
+    setElementStatus(`${waitType} 액션을 추가했습니다.`, 'success');
+  });
+}
+
+/**
+ * 상호작용 액션을 이벤트로 추가
+ */
+function addInteractionAction(interactionType, path, value) {
+  withActiveTab((tab) => {
+    const timestamp = Date.now();
+    const currentUrl = tab?.url || '';
+    const currentTitle = tab?.title || '';
+    
+    if (!path || !path.length) {
+      alert('요소를 선택하세요.');
+      return;
+    }
+    
+    const selectors = path.map((item, idx) => {
+      if (!item || !item.selector) return null;
+      const type = item.type || inferSelectorType(item.selector);
+      return {
+        selector: item.selector,
+        type,
+        textValue: item.textValue || null,
+        xpathValue: item.xpathValue || null,
+        matchMode: item.matchMode || null,
+        score: idx === path.length - 1 ? 100 : 80
+      };
+    }).filter(Boolean);
+    
+    if (!selectors.length) {
+      alert('셀렉터를 찾을 수 없습니다.');
+      return;
+    }
+    
+    const targetEntry = selectors[selectors.length - 1];
+    const iframeContext = path[path.length - 1]?.iframeContext || null;
+    
+    const eventRecord = {
+      version: EVENT_SCHEMA_VERSION,
+      timestamp,
+      action: interactionType,
+      value: value || null,
+      tag: null,
+      selectorCandidates: selectors,
+      iframeContext,
+      page: {
+        url: currentUrl,
+        title: currentTitle
+      },
+      frame: { iframeContext },
+      target: null,
+      clientRect: null,
+      metadata: {
+        schemaVersion: EVENT_SCHEMA_VERSION,
+        userAgent: navigator.userAgent
+      },
+      manual: {
+        id: `interaction-${timestamp}`,
+        type: interactionType,
+        resultName: null,
+        attributeName: null
+      },
+      primarySelector: targetEntry.selector,
+      primarySelectorType: targetEntry.type,
+      primarySelectorText: targetEntry.textValue,
+      primarySelectorXPath: targetEntry.xpathValue,
+      primarySelectorMatchMode: targetEntry.matchMode
+    };
+    
+    // 이벤트 저장
+    chrome.runtime.sendMessage({ type: 'SAVE_EVENT', event: eventRecord }, () => {
+      chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
+        const events = (res && res.events) || [];
+        allEvents = events.map(normalizeEventRecord);
+        updateCode({ preloadedEvents: allEvents });
+        refreshTimeline();
+      });
+    });
+    
+    if (interactionActionsContainer) {
+      interactionActionsContainer.classList.add('hidden');
+    }
+    setElementStatus(`${interactionType} 액션을 추가했습니다.`, 'success');
+  });
+}
+
 function persistManualActions(nextActions, callback) {
   manualActions = nextActions;
   chrome.storage.local.set({manualActions: nextActions}, () => {
@@ -3443,6 +4407,59 @@ function applySelectionAction(actionType, options = {}) {
     setElementStatus('먼저 요소를 선택하세요.', 'error');
     return;
   }
+  
+  // pendingAction이 verify, wait, interaction인 경우 처리
+  if (selectionState.pendingAction) {
+    const pending = selectionState.pendingAction;
+    if (pending.startsWith('verify')) {
+      let value = null;
+      if (pending === 'verifyText') {
+        const lastPathItem = path[path.length - 1];
+        if (lastPathItem && lastPathItem.textValue) {
+          value = lastPathItem.textValue;
+        } else {
+          const textValue = prompt('검증할 텍스트를 입력하세요:');
+          if (textValue === null) {
+            selectionState.pendingAction = null;
+            return;
+          }
+          value = textValue;
+        }
+      }
+      addVerifyAction(pending, path, value);
+      selectionState.pendingAction = null;
+      cancelSelectionWorkflow('', 'info');
+      return;
+    } else if (pending === 'waitForElement') {
+      addWaitAction('waitForElement', null, path);
+      selectionState.pendingAction = null;
+      cancelSelectionWorkflow('', 'info');
+      return;
+    } else if (['click', 'doubleClick', 'rightClick', 'hover', 'clear', 'type', 'select'].includes(pending)) {
+      // 상호작용 액션 처리
+      let value = null;
+      if (pending === 'type') {
+        const inputValue = prompt('입력할 텍스트를 입력하세요:');
+        if (inputValue === null) {
+          selectionState.pendingAction = null;
+          return;
+        }
+        value = inputValue;
+      } else if (pending === 'select') {
+        const selectValue = prompt('선택할 옵션의 텍스트 또는 값을 입력하세요:');
+        if (selectValue === null) {
+          selectionState.pendingAction = null;
+          return;
+        }
+        value = selectValue;
+      }
+      addInteractionAction(pending, path, value);
+      selectionState.pendingAction = null;
+      cancelSelectionWorkflow('', 'info');
+      return;
+    }
+  }
+  
   if (actionType === 'commit') {
     const entry = buildManualActionEntry('chain', path, options);
     if (!entry) {
@@ -4451,19 +5468,37 @@ function buildPlaywrightPythonAction(ev, selectorInfo, base = 'page') {
   const value = escapeForPythonString(ev.value || '');
   const positionInfo = resolveSelectorPosition(ev);
   
+  const getLocator = () => {
+    if (selectorInfo.type === 'text' && positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
+      const index = positionInfo.nthOfType - 1;
+      return `${locatorExpr}.nth(${index})`;
+    }
+    return locatorExpr;
+  };
+  
   if (ev.action === 'click') {
-    if (selectorInfo.type === 'text' && positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
-      const index = positionInfo.nthOfType - 1;
-      return `${locatorExpr}.nth(${index}).click()`;
-    }
-    return `${locatorExpr}.click()`;
+    return `${getLocator()}.click()`;
   }
-  if (ev.action === 'input') {
-    if (selectorInfo.type === 'text' && positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
-      const index = positionInfo.nthOfType - 1;
-      return `${locatorExpr}.nth(${index}).fill("${value}")`;
+  if (ev.action === 'doubleClick') {
+    return `${getLocator()}.dblclick()`;
+  }
+  if (ev.action === 'rightClick') {
+    return `${getLocator()}.click(button="right")`;
+  }
+  if (ev.action === 'hover') {
+    return `${getLocator()}.hover()`;
+  }
+  if (ev.action === 'input' || ev.action === 'type') {
+    return `${getLocator()}.fill("${value}")`;
+  }
+  if (ev.action === 'clear') {
+    return `${getLocator()}.clear()`;
+  }
+  if (ev.action === 'select') {
+    if (value) {
+      return `${getLocator()}.select_option("${value}")`;
     }
-    return `${locatorExpr}.fill("${value}")`;
+    return `${getLocator()}.select_option()`;
   }
   return null;
 }
@@ -4474,19 +5509,37 @@ function buildPlaywrightJSAction(ev, selectorInfo, base = 'page') {
   const value = escapeForJSString(ev.value || '');
   const positionInfo = resolveSelectorPosition(ev);
   
+  const getLocator = () => {
+    if (selectorInfo.type === 'text' && positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
+      const index = positionInfo.nthOfType - 1;
+      return `${locatorExpr}.nth(${index})`;
+    }
+    return locatorExpr;
+  };
+  
   if (ev.action === 'click') {
-    if (selectorInfo.type === 'text' && positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
-      const index = positionInfo.nthOfType - 1;
-      return `await ${locatorExpr}.nth(${index}).click();`;
-    }
-    return `await ${locatorExpr}.click();`;
+    return `await ${getLocator()}.click();`;
   }
-  if (ev.action === 'input') {
-    if (selectorInfo.type === 'text' && positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
-      const index = positionInfo.nthOfType - 1;
-      return `await ${locatorExpr}.nth(${index}).fill("${value}");`;
+  if (ev.action === 'doubleClick') {
+    return `await ${getLocator()}.dblclick();`;
+  }
+  if (ev.action === 'rightClick') {
+    return `await ${getLocator()}.click({ button: 'right' });`;
+  }
+  if (ev.action === 'hover') {
+    return `await ${getLocator()}.hover();`;
+  }
+  if (ev.action === 'input' || ev.action === 'type') {
+    return `await ${getLocator()}.fill("${value}");`;
+  }
+  if (ev.action === 'clear') {
+    return `await ${getLocator()}.clear();`;
+  }
+  if (ev.action === 'select') {
+    if (value) {
+      return `await ${getLocator()}.selectOption("${value}");`;
     }
-    return `await ${locatorExpr}.fill("${value}");`;
+    return `await ${getLocator()}.selectOption();`;
   }
   return null;
 }
@@ -4496,40 +5549,56 @@ function buildSeleniumPythonAction(ev, selectorInfo, driverVar = 'driver') {
   const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
   const value = escapeForPythonString(ev.value || '');
   const positionInfo = resolveSelectorPosition(ev);
-  if (selectorType === 'xpath') {
-    const xpath = escapeForPythonString(getXPathValue(selectorInfo));
-    if (ev.action === 'click') {
-      return `${driverVar}.find_element(By.XPATH, "${xpath}").click()`;
+  
+  const getElement = () => {
+    if (selectorType === 'xpath') {
+      const xpath = escapeForPythonString(getXPathValue(selectorInfo));
+      return `${driverVar}.find_element(By.XPATH, "${xpath}")`;
     }
-    if (ev.action === 'input') {
-      return `${driverVar}.find_element(By.XPATH, "${xpath}").send_keys("${value}")`;
-    }
-  }
-  if (selectorType === 'text') {
-    const textVal = getTextValue(selectorInfo);
-    if (textVal) {
-      const matchMode = selectorInfo.matchMode || 'exact';
-      let expr = matchMode === 'exact'
-        ? `//*[normalize-space(.) = "${textVal}"]`
-        : `//*[contains(normalize-space(.), "${textVal}")]`;
-      if (positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
-        expr = `(${expr})[${positionInfo.nthOfType}]`;
-      }
-      const escapedExpr = escapeForPythonString(expr);
-      if (ev.action === 'click') {
-        return `${driverVar}.find_element(By.XPATH, "${escapedExpr}").click()`;
-      }
-      if (ev.action === 'input') {
-        return `${driverVar}.find_element(By.XPATH, "${escapedExpr}").send_keys("${value}")`;
+    if (selectorType === 'text') {
+      const textVal = getTextValue(selectorInfo);
+      if (textVal) {
+        const matchMode = selectorInfo.matchMode || 'exact';
+        let expr = matchMode === 'exact'
+          ? `//*[normalize-space(.) = "${textVal}"]`
+          : `//*[contains(normalize-space(.), "${textVal}")]`;
+        if (positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
+          expr = `(${expr})[${positionInfo.nthOfType}]`;
+        }
+        const escapedExpr = escapeForPythonString(expr);
+        return `${driverVar}.find_element(By.XPATH, "${escapedExpr}")`;
       }
     }
-  }
-  const cssSelector = escapeForPythonString(selectorInfo.selector);
+    const cssSelector = escapeForPythonString(selectorInfo.selector);
+    return `${driverVar}.find_element(By.CSS_SELECTOR, "${cssSelector}")`;
+  };
+  
+  const element = getElement();
+  if (!element) return null;
+  
   if (ev.action === 'click') {
-    return `${driverVar}.find_element(By.CSS_SELECTOR, "${cssSelector}").click()`;
+    return `${element}.click()`;
   }
-  if (ev.action === 'input') {
-    return `${driverVar}.find_element(By.CSS_SELECTOR, "${cssSelector}").send_keys("${value}")`;
+  if (ev.action === 'doubleClick') {
+    return `${element}.double_click()`;
+  }
+  if (ev.action === 'rightClick') {
+    return `${element}.context_click()`;
+  }
+  if (ev.action === 'hover') {
+    return `ActionChains(${driverVar}).move_to_element(${element}).perform()`;
+  }
+  if (ev.action === 'input' || ev.action === 'type') {
+    return `${element}.send_keys("${value}")`;
+  }
+  if (ev.action === 'clear') {
+    return `${element}.clear()`;
+  }
+  if (ev.action === 'select') {
+    if (value) {
+      return `Select(${element}).select_by_visible_text("${value}")`;
+    }
+    return `Select(${element})`;
   }
   return null;
 }
@@ -4539,40 +5608,56 @@ function buildSeleniumJSAction(ev, selectorInfo) {
   const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
   const value = escapeForJSString(ev.value || '');
   const positionInfo = resolveSelectorPosition(ev);
-  if (selectorType === 'xpath') {
-    const xpath = escapeForJSString(getXPathValue(selectorInfo));
-    if (ev.action === 'click') {
-      return `  await driver.findElement(By.xpath("${xpath}")).click();`;
+  
+  const getElement = () => {
+    if (selectorType === 'xpath') {
+      const xpath = escapeForJSString(getXPathValue(selectorInfo));
+      return `driver.findElement(By.xpath("${xpath}"))`;
     }
-    if (ev.action === 'input') {
-      return `  await driver.findElement(By.xpath("${xpath}")).sendKeys("${value}");`;
-    }
-  }
-  if (selectorType === 'text') {
-    const textVal = getTextValue(selectorInfo);
-    if (textVal) {
-      const matchMode = selectorInfo.matchMode || 'exact';
-      let expr = matchMode === 'exact'
-        ? `//*[normalize-space(.) = "${textVal}"]`
-        : `//*[contains(normalize-space(.), "${textVal}")]`;
-      if (positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
-        expr = `(${expr})[${positionInfo.nthOfType}]`;
-      }
-      const escapedExpr = escapeForJSString(expr);
-      if (ev.action === 'click') {
-        return `  await driver.findElement(By.xpath("${escapedExpr}")).click();`;
-      }
-      if (ev.action === 'input') {
-        return `  await driver.findElement(By.xpath("${escapedExpr}")).sendKeys("${value}");`;
+    if (selectorType === 'text') {
+      const textVal = getTextValue(selectorInfo);
+      if (textVal) {
+        const matchMode = selectorInfo.matchMode || 'exact';
+        let expr = matchMode === 'exact'
+          ? `//*[normalize-space(.) = "${textVal}"]`
+          : `//*[contains(normalize-space(.), "${textVal}")]`;
+        if (positionInfo && positionInfo.nthOfType && positionInfo.repeats) {
+          expr = `(${expr})[${positionInfo.nthOfType}]`;
+        }
+        const escapedExpr = escapeForJSString(expr);
+        return `driver.findElement(By.xpath("${escapedExpr}"))`;
       }
     }
-  }
-  const cssSelector = escapeForJSString(selectorInfo.selector);
+    const cssSelector = escapeForJSString(selectorInfo.selector);
+    return `driver.findElement(By.css("${cssSelector}"))`;
+  };
+  
+  const element = getElement();
+  if (!element) return null;
+  
   if (ev.action === 'click') {
-    return `  await driver.findElement(By.css("${cssSelector}")).click();`;
+    return `  await ${element}.click();`;
   }
-  if (ev.action === 'input') {
-    return `  await driver.findElement(By.css("${cssSelector}")).sendKeys("${value}");`;
+  if (ev.action === 'doubleClick') {
+    return `  await ${element}.doubleClick();`;
+  }
+  if (ev.action === 'rightClick') {
+    return `  await driver.actions().contextClick(${element}).perform();`;
+  }
+  if (ev.action === 'hover') {
+    return `  await driver.actions().move({ origin: ${element} }).perform();`;
+  }
+  if (ev.action === 'input' || ev.action === 'type') {
+    return `  await ${element}.sendKeys("${value}");`;
+  }
+  if (ev.action === 'clear') {
+    return `  await ${element}.clear();`;
+  }
+  if (ev.action === 'select') {
+    if (value) {
+      return `  await new Select(${element}).selectByVisibleText("${value}");`;
+    }
+    return `  await new Select(${element});`;
   }
   return null;
 }
@@ -4791,6 +5876,8 @@ function generateCode(events, manualList, framework, language) {
     if (languageLower === 'python') {
     lines.push("from selenium import webdriver");
       lines.push("from selenium.webdriver.common.by import By");
+      lines.push("from selenium.webdriver.common.action_chains import ActionChains");
+      lines.push("from selenium.webdriver.support.ui import Select");
       lines.push("");
     lines.push("driver = webdriver.Chrome()");
     lines.push("driver.get('REPLACE_URL')");
@@ -4821,6 +5908,8 @@ function generateCode(events, manualList, framework, language) {
     } else if (languageLower === 'python-class') {
       lines.push("from selenium import webdriver");
       lines.push("from selenium.webdriver.common.by import By");
+      lines.push("from selenium.webdriver.common.action_chains import ActionChains");
+      lines.push("from selenium.webdriver.support.ui import Select");
       lines.push("");
       lines.push("class GeneratedTestCase:");
       lines.push("  def __init__(self, driver):");
@@ -4943,4 +6032,444 @@ function generateCode(events, manualList, framework, language) {
     }
   }
   return lines.join('\n');
+}
+
+// ==================== TestArchitect 데이터 전송 기능 ====================
+
+/**
+ * 유일성이 확보된 셀렉터만 필터링
+ */
+function getUniqueSelectors(selectorCandidates) {
+  if (!Array.isArray(selectorCandidates) || selectorCandidates.length === 0) {
+    return [];
+  }
+  
+  // 유일성이 확보된 셀렉터만 필터링 (unique === true)
+  const uniqueSelectors = selectorCandidates.filter(candidate => {
+    return candidate && candidate.unique === true && candidate.selector;
+  });
+  
+  // 유일한 셀렉터가 없으면 점수가 높은 셀렉터 중 최상위 하나만 반환
+  if (uniqueSelectors.length === 0) {
+    const sorted = [...selectorCandidates]
+      .filter(c => c && c.selector)
+      .sort((a, b) => (b.score || 0) - (a.score || 0));
+    return sorted.length > 0 ? [sorted[0]] : [];
+  }
+  
+  // 점수 순으로 정렬하여 반환
+  return uniqueSelectors.sort((a, b) => (b.score || 0) - (a.score || 0));
+}
+
+/**
+ * 셀렉터를 문서 스펙 형식으로 변환
+ */
+function buildSelectorObject(selectorCandidate) {
+  if (!selectorCandidate || !selectorCandidate.selector) {
+    return {};
+  }
+  
+  const selector = selectorCandidate.selector;
+  const type = selectorCandidate.type || inferSelectorType(selector);
+  
+  const selectors = {};
+  
+  // 셀렉터 타입에 따라 적절한 필드에 할당
+  if (type === 'id') {
+    let idValue = selector.startsWith('#') ? selector.slice(1) : selector;
+    // css= 접두사 제거
+    if (idValue.startsWith('css=')) {
+      idValue = idValue.slice(4);
+      if (idValue.startsWith('#')) {
+        idValue = idValue.slice(1);
+      }
+    }
+    selectors.id = `#${idValue}`;
+    // CSS 셀렉터로도 추가
+    selectors.css = `#${idValue}`;
+  } else if (type === 'css' || type === 'class' || type === 'class-tag') {
+    let cssValue = selector.startsWith('css=') ? selector.slice(4) : selector;
+    // #으로 시작하면 id로도 추가
+    if (cssValue.startsWith('#')) {
+      selectors.id = cssValue;
+    }
+    selectors.css = cssValue;
+  } else if (type === 'xpath' || type === 'xpath-full') {
+    let xpathValue = selector.startsWith('xpath=') ? selector.slice(6) : selector;
+    // //로 시작하지 않으면 추가
+    if (!xpathValue.startsWith('//') && !xpathValue.startsWith('/')) {
+      xpathValue = '//' + xpathValue;
+    }
+    selectors.xpath = xpathValue;
+  } else if (type === 'text') {
+    const textValue = selectorCandidate.textValue || getTextValue({ selector });
+    if (textValue) {
+      // XPath 텍스트 셀렉터
+      selectors.text = `//*[text()='${textValue}']`;
+      selectors.xpath = `//*[text()='${textValue}']`;
+    }
+  }
+  
+  // data-testid 등 속성 기반 셀렉터 처리
+  if (type && type.startsWith('data-')) {
+    const attrName = type;
+    const attrValue = extractAttributeValue(selector, attrName);
+    if (attrValue) {
+      selectors.dataTestId = `[${attrName}="${attrValue}"]`;
+      // CSS 셀렉터로도 추가
+      if (!selectors.css) {
+        selectors.css = `[${attrName}="${attrValue}"]`;
+      }
+    }
+  }
+  
+  // name 속성 처리
+  if (type === 'name') {
+    const nameValue = extractAttributeValue(selector, 'name');
+    if (nameValue) {
+      selectors.name = `[name="${nameValue}"]`;
+      // CSS 셀렉터로도 추가
+      if (!selectors.css) {
+        selectors.css = `[name="${nameValue}"]`;
+      }
+    }
+  }
+  
+  return selectors;
+}
+
+/**
+ * 이벤트를 문서 스펙 형식으로 변환
+ */
+function convertEventToSpecFormat(event) {
+  if (!event) return null;
+  
+  // 액션 타입 매핑
+  const actionTypeMap = {
+    'click': 'click',
+    'doubleClick': 'dblclick',
+    'rightClick': 'click', // 우클릭도 click으로 처리
+    'input': 'type',
+    'type': 'type',
+    'clear': 'type',
+    'goto': 'navigate',
+    'select': 'select',
+    'hover': 'hover',
+    'verifyText': 'assert',
+    'verifyElementPresent': 'assert',
+    'verifyElementNotPresent': 'assert',
+    'verifyTitle': 'assert',
+    'verifyUrl': 'assert',
+    'waitForElement': 'wait',
+    'wait': 'wait'
+  };
+  
+  const eventType = actionTypeMap[event.action] || event.action;
+  
+  // 유일성이 확보된 셀렉터만 사용
+  const uniqueSelectors = getUniqueSelectors(event.selectorCandidates || []);
+  
+  // Target 객체 생성
+  let target = null;
+  if (event.target || uniqueSelectors.length > 0) {
+    const bestSelector = uniqueSelectors.length > 0 ? uniqueSelectors[0] : null;
+    const selectorObj = bestSelector ? buildSelectorObject(bestSelector) : {};
+    
+    target = {
+      tagName: event.target?.tag || event.tag || null,
+      id: event.target?.id || null,
+      className: Array.isArray(event.target?.classes) 
+        ? event.target.classes.join(' ') 
+        : (event.target?.classes || null),
+      type: event.target?.type || null,
+      text: event.target?.text || null,
+      selectors: selectorObj,
+      attributes: {}
+    };
+    
+    // attributes 추출 (data-testid 등)
+    if (bestSelector) {
+      const selector = bestSelector.selector || '';
+      const dataTestId = extractAttributeValue(selector, 'data-testid');
+      if (dataTestId) {
+        target.attributes['data-testid'] = dataTestId;
+      }
+      const ariaLabel = extractAttributeValue(selector, 'aria-label');
+      if (ariaLabel) {
+        target.attributes['aria-label'] = ariaLabel;
+      }
+    }
+    
+    // 빈 객체가 되면 null로
+    if (!target.tagName && !target.id && !target.className && 
+        Object.keys(target.selectors).length === 0) {
+      target = null;
+    }
+  }
+  
+  // URL 추출
+  const url = event.page?.url || event.url || '';
+  
+  // Viewport 정보 (기본값 사용, 실제로는 탭에서 가져와야 함)
+  // TODO: 실제 탭의 viewport 크기를 가져오도록 개선 필요
+  const viewport = {
+    width: window.screen ? window.screen.width : 1920,
+    height: window.screen ? window.screen.height : 1080
+  };
+  
+  // 이벤트별 특수 처리
+  const convertedEvent = {
+    id: `event-${event.timestamp || Date.now()}`,
+    type: eventType,
+    timestamp: event.timestamp || Date.now(),
+    target: target,
+    value: event.value || null,
+    url: url,
+    viewport: viewport
+  };
+  
+  // navigate 타입은 target이 null
+  if (eventType === 'navigate') {
+    convertedEvent.target = null;
+    convertedEvent.value = url;
+  }
+  
+  // wait 타입 처리
+  if (eventType === 'wait') {
+    if (event.action === 'waitForElement') {
+      convertedEvent.condition = 'visible';
+      convertedEvent.timeout = 5000;
+    } else if (event.action === 'wait') {
+      convertedEvent.condition = 'timeout';
+      convertedEvent.timeout = event.value || 1000;
+      convertedEvent.target = null;
+    }
+  }
+  
+  // assert 타입 처리
+  if (eventType === 'assert') {
+    if (event.action === 'verifyText') {
+      convertedEvent.assertion = 'text';
+      convertedEvent.expected = event.value || target?.text || '';
+    } else if (event.action === 'verifyElementPresent') {
+      convertedEvent.assertion = 'visible';
+    } else if (event.action === 'verifyElementNotPresent') {
+      convertedEvent.assertion = 'hidden';
+    } else if (event.action === 'verifyTitle') {
+      convertedEvent.assertion = 'text';
+      convertedEvent.target = null;
+      convertedEvent.expected = event.value || '';
+    } else if (event.action === 'verifyUrl') {
+      convertedEvent.assertion = 'attribute';
+      convertedEvent.target = null;
+      convertedEvent.expected = event.value || url;
+    }
+  }
+  
+  return convertedEvent;
+}
+
+/**
+ * 세션 ID 생성
+ */
+function generateSessionId() {
+  return `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
+/**
+ * 브라우저 및 OS 정보 수집
+ */
+function getBrowserMetadata() {
+  const userAgent = navigator.userAgent;
+  let browser = 'unknown';
+  let browserVersion = '0.0.0';
+  let os = 'unknown';
+  let osVersion = 'unknown';
+  
+  // 브라우저 감지
+  if (userAgent.includes('Chrome') && !userAgent.includes('Edg')) {
+    browser = 'chrome';
+    const match = userAgent.match(/Chrome\/(\d+)/);
+    if (match) browserVersion = `${match[1]}.0.0.0`;
+  } else if (userAgent.includes('Firefox')) {
+    browser = 'firefox';
+    const match = userAgent.match(/Firefox\/(\d+)/);
+    if (match) browserVersion = `${match[1]}.0.0`;
+  } else if (userAgent.includes('Safari') && !userAgent.includes('Chrome')) {
+    browser = 'safari';
+    const match = userAgent.match(/Version\/(\d+)/);
+    if (match) browserVersion = `${match[1]}.0`;
+  } else if (userAgent.includes('Edg')) {
+    browser = 'edge';
+    const match = userAgent.match(/Edg\/(\d+)/);
+    if (match) browserVersion = `${match[1]}.0.0.0`;
+  }
+  
+  // OS 감지
+  if (userAgent.includes('Windows')) {
+    os = 'Windows';
+    const match = userAgent.match(/Windows NT (\d+\.\d+)/);
+    if (match) {
+      const version = match[1];
+      if (version === '10.0') osVersion = '10';
+      else if (version === '6.3') osVersion = '8.1';
+      else if (version === '6.2') osVersion = '8';
+      else if (version === '6.1') osVersion = '7';
+      else osVersion = version;
+    }
+  } else if (userAgent.includes('Mac OS X')) {
+    os = 'macOS';
+    const match = userAgent.match(/Mac OS X (\d+[._]\d+)/);
+    if (match) osVersion = match[1].replace('_', '.');
+  } else if (userAgent.includes('Linux')) {
+    os = 'Linux';
+  }
+  
+  return {
+    browser,
+    browserVersion,
+    os,
+    osVersion,
+    userAgent
+  };
+}
+
+/**
+ * 코드 객체 생성
+ */
+function buildCodeObject(events, manualActions, framework, language) {
+  const code = generateCode(events, manualActions, framework, language);
+  
+  const codeObj = {};
+  
+  if (language === 'python' || language === 'python-class') {
+    codeObj.python = {
+      framework: framework,
+      code: code
+    };
+  }
+  
+  if (language === 'javascript' || language === 'typescript') {
+    codeObj.javascript = {
+      framework: framework,
+      code: code
+    };
+  }
+  
+  return codeObj;
+}
+
+/**
+ * 녹화 데이터를 문서 스펙 형식으로 변환
+ */
+function convertRecordingToSpecFormat(events, manualActions, sessionId, tcId, projectId) {
+  const normalizedEvents = Array.isArray(events) ? events.map(normalizeEventRecord) : [];
+  const convertedEvents = normalizedEvents
+    .map(convertEventToSpecFormat)
+    .filter(event => event !== null);
+  
+  // 시작/종료 시간 계산
+  const timestamps = convertedEvents.map(e => e.timestamp).filter(Boolean);
+  const startTime = timestamps.length > 0 ? Math.min(...timestamps) : Date.now();
+  const endTime = timestamps.length > 0 ? Math.max(...timestamps) : Date.now();
+  const duration = endTime - startTime;
+  
+  // 메타데이터 수집
+  const browserMetadata = getBrowserMetadata();
+  const metadata = {
+    ...browserMetadata,
+    startTime: startTime,
+    endTime: endTime,
+    duration: duration
+  };
+  
+  // 코드 객체 생성
+  const code = buildCodeObject(normalizedEvents, manualActions, selectedFramework, selectedLanguage);
+  
+  return {
+    type: 'recording_complete',
+    sessionId: sessionId,
+    tcId: tcId || null,
+    projectId: projectId || 1,
+    events: convertedEvents,
+    code: code,
+    metadata: metadata
+  };
+}
+
+/**
+ * TestArchitect로 녹화 데이터 전송
+ */
+async function sendRecordingData(recordingData) {
+  try {
+    const response = await fetch('http://localhost:3000/api/recording', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(recordingData)
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
+    }
+    
+    const result = await response.json();
+    
+    if (result.success) {
+      console.log('녹화 데이터가 성공적으로 저장되었습니다');
+      return result;
+    } else {
+      console.error('녹화 데이터 저장 실패:', result.error);
+      throw new Error(result.error || 'Unknown error');
+    }
+  } catch (error) {
+    console.error('전송 실패:', error);
+    throw error;
+  }
+}
+
+/**
+ * 녹화 데이터 전송 처리
+ */
+function handleSendRecording() {
+  const tcId = tcIdInput ? parseInt(tcIdInput.value) || null : null;
+  const projectId = projectIdInput ? parseInt(projectIdInput.value) || 1 : 1;
+  
+  if (!tcId) {
+    alert('테스트 케이스 ID(tcId)를 입력해주세요.');
+    return;
+  }
+  
+  chrome.runtime.sendMessage({type:'GET_EVENTS'}, async (res) => {
+    const events = (res && res.events) || [];
+    
+    loadManualActions((manualActions) => {
+      const sessionId = generateSessionId();
+      
+      try {
+        // 데이터 변환
+        const recordingData = convertRecordingToSpecFormat(
+          events,
+          manualActions,
+          sessionId,
+          tcId,
+          projectId
+        );
+        
+        // 전송
+        sendRecordingData(recordingData)
+          .then((result) => {
+            alert(`녹화 데이터가 성공적으로 전송되었습니다.\nTC ID: ${result.tcId || tcId}\nScript ID: ${result.scriptId || 'N/A'}`);
+          })
+          .catch((error) => {
+            alert(`전송 실패: ${error.message}`);
+          });
+      } catch (error) {
+        alert(`데이터 변환 실패: ${error.message}`);
+        console.error('데이터 변환 오류:', error);
+      }
+    });
+  });
 }

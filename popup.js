@@ -40,6 +40,8 @@ const aiReviewStatusEl = document.getElementById('ai-review-status');
 const aiReviewHelpEl = document.getElementById('ai-review-help');
 const codeReviewSummaryEl = document.getElementById('code-review-summary');
 const codeReviewDiffEl = document.getElementById('code-review-diff');
+const tcIdInput = document.getElementById('tc-id-input');
+const projectIdInput = document.getElementById('project-id-input');
 let recording = false;
 let selectedFramework = 'playwright';
 let selectedLanguage = 'python';
@@ -775,6 +777,51 @@ function sendMessageWithInjection(tabId, message, callback) {
     .catch((error) => {
       if (callback) callback(null, error);
     });
+}
+
+// URL에서 쿼리 파라미터 추출 함수
+function extractUrlParams(url) {
+  if (!url) return {};
+  try {
+    const urlObj = new URL(url);
+    const params = {};
+    urlObj.searchParams.forEach((value, key) => {
+      params[key] = value;
+    });
+    return params;
+  } catch (e) {
+    // URL 파싱 실패 시 빈 객체 반환
+    return {};
+  }
+}
+
+// URL에서 tcId와 projectId를 추출하여 입력 필드에 자동 설정
+function autoFillIdsFromUrl(url) {
+  if (!url) return;
+  
+  const params = extractUrlParams(url);
+  
+  // tcId 파라미터 추출 (tcId 또는 tc_id 등 다양한 형식 지원)
+  const tcId = params.tcId || params.tc_id || params.testCaseId;
+  if (tcId && tcIdInput) {
+    const tcIdNum = parseInt(tcId, 10);
+    if (!isNaN(tcIdNum) && tcIdNum > 0 && !tcIdInput.value) {
+      // 입력 필드가 비어 있을 때만 자동 설정
+      tcIdInput.value = tcIdNum;
+    }
+  }
+  
+  // projectId 파라미터 추출 (projectId 또는 project_id 등 다양한 형식 지원)
+  const projectId = params.projectId || params.project_id || params.projectid;
+  if (projectId && projectIdInput) {
+    const projectIdNum = parseInt(projectId, 10);
+    if (!isNaN(projectIdNum) && projectIdNum > 0) {
+      // 입력 필드가 비어 있거나 기본값일 때만 자동 설정
+      if (!projectIdInput.value || projectIdInput.value === '1') {
+        projectIdInput.value = projectIdNum;
+      }
+    }
+  }
 }
 
 function withActiveTab(callback) {
@@ -6024,3 +6071,64 @@ function generateCode(events, manualList, framework, language) {
   }
   return lines.join('\n');
 }
+
+// 팝업이 열릴 때 현재 활성 탭의 URL에서 tcId와 projectId 자동 추출
+(function initAutoFillFromUrl() {
+  // DOM이 로드될 때까지 기다린 후 실행
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', checkAndAutoFillIds);
+  } else {
+    // 이미 로드된 경우 즉시 실행
+    checkAndAutoFillIds();
+  }
+  
+  function checkAndAutoFillIds() {
+    // 현재 활성 탭의 URL 확인
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs && tabs.length > 0) {
+        const tab = tabs[0];
+        if (tab && tab.url) {
+          // URL에서 파라미터 추출하여 입력 필드에 설정
+          autoFillIdsFromUrl(tab.url);
+        }
+      }
+      
+      // 다른 창의 활성 탭도 확인 (여러 창이 열려있을 수 있음)
+      chrome.tabs.query({ active: true }, (allTabs) => {
+        if (allTabs && allTabs.length > 0) {
+          // 일반 브라우저 창의 탭만 필터링
+          const normalTabs = allTabs.filter(t => {
+            const url = t.url || '';
+            return !url.startsWith('chrome://') && 
+                   !url.startsWith('chrome-extension://') && 
+                   !url.startsWith('about:') &&
+                   !url.startsWith('edge://');
+          });
+          
+          if (normalTabs.length > 0) {
+            const tab = normalTabs[0];
+            if (tab && tab.url) {
+              autoFillIdsFromUrl(tab.url);
+            }
+          }
+        }
+      });
+    });
+    
+    // 탭 URL 변경 감지 (자동화 툴에서 녹화 버튼을 눌러 URL이 변경될 수 있음)
+    // 팝업이 열려있는 동안에만 작동
+    const tabUpdateListener = function onTabUpdated(tabId, changeInfo, tab) {
+      // URL이 완전히 로드되었을 때만 처리
+      if (changeInfo.status === 'complete' && tab && tab.url && tab.active) {
+        autoFillIdsFromUrl(tab.url);
+      }
+    };
+    
+    chrome.tabs.onUpdated.addListener(tabUpdateListener);
+    
+    // 팝업이 닫힐 때 리스너 제거 (메모리 누수 방지)
+    window.addEventListener('beforeunload', () => {
+      chrome.tabs.onUpdated.removeListener(tabUpdateListener);
+    });
+  }
+})();

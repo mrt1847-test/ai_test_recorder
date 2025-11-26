@@ -7,19 +7,21 @@
 <link rel="stylesheet" href="vendor/codemirror/neo.css">
 <style>
   body {
-    width: 1200px;
-    min-width: 1200px;
-    max-width: 1200px;
-    height: 800px;
-    min-height: 800px;
-    max-height: 800px;
+    min-width: 600px;
+    min-height: 400px;
     margin: 0;
-    padding: 0;
-    overflow: hidden;
+    padding: 8px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    box-sizing: border-box;
+  }
+  html {
+    height: 100%;
+    overflow: visible;
   }
   #main {
-    height: calc(100vh - 200px);
-    overflow-y: auto;
+    min-height: 400px;
+    overflow-y: visible;
   }
 </style>
 </head>
@@ -37,6 +39,19 @@
           <span class="toolbar-label">테스트 URL (선택)</span>
           <input id="test-url" placeholder="https://example.com"/>
         </label>
+      </div>
+      <div class="toolbar-row">
+        <label class="toolbar-field" for="tc-id-input">
+          <span class="toolbar-label">TC ID *</span>
+          <input id="tc-id-input" type="number" placeholder="123" min="1" required/>
+        </label>
+        <label class="toolbar-field" for="project-id-input">
+          <span class="toolbar-label">Project ID</span>
+          <input id="project-id-input" type="number" placeholder="1" min="1" value="1"/>
+        </label>
+        <div class="toolbar-field">
+          <button id="send-recording-btn" class="toolbar-btn">TestArchitect로 전송</button>
+        </div>
       </div>
       <div class="toolbar-row ai-config">
         <label class="toolbar-field" for="ai-endpoint">

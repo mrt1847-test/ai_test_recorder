@@ -675,8 +675,8 @@ chrome.action.onClicked.addListener(() => {
   chrome.windows.create({
     url: chrome.runtime.getURL('popup.html'),
     type: 'popup',
-    width: 1200,
-    height: 800,
+    width: 1220,
+    height: 850,
     focused: true
   });
 });
@@ -764,5 +764,54 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  return false;
+});
+
+// 외부에서 오는 메시지 처리 (자동화 툴에서 호출)
+chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === 'OPEN_POPUP') {
+    // 새 탭에서 팝업 열기
+    chrome.tabs.create({
+      url: chrome.runtime.getURL('popup.html'),
+      active: true
+    }, (tab) => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      
+      // content script 자동 주입 (활성 탭이 있는 경우)
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs && tabs.length > 0) {
+          const activeTab = tabs[0];
+          // chrome-extension:// 또는 chrome:// 페이지는 제외
+          if (activeTab.url && 
+              !activeTab.url.startsWith('chrome://') && 
+              !activeTab.url.startsWith('chrome-extension://') &&
+              !activeTab.url.startsWith('edge://')) {
+            chrome.scripting.executeScript({
+              target: { tabId: activeTab.id },
+              files: ['content.js']
+            }, () => {
+              if (chrome.runtime.lastError) {
+                console.warn('Content script injection failed:', chrome.runtime.lastError);
+              } else {
+                injectedTabs.add(activeTab.id);
+              }
+            });
+          }
+        }
+      });
+      
+      sendResponse({ ok: true, tabId: tab.id, extensionId: chrome.runtime.id });
+    });
+    return true; // 비동기 응답을 위해 true 반환
+  }
+  
+  if (msg && msg.type === 'GET_EXTENSION_ID') {
+    sendResponse({ extensionId: chrome.runtime.id });
+    return true;
+  }
+  
   return false;
 });

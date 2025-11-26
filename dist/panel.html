@@ -64,9 +64,34 @@
         <button id="stop-record" class="toolbar-btn" disabled>Stop</button>
         <button id="replay-btn" class="toolbar-btn">Replay</button>
         <button id="element-select-btn" class="toolbar-btn">요소 선택</button>
-        <button id="interaction-btn" class="toolbar-btn">상호작용 추가</button>
-        <button id="verify-btn" class="toolbar-btn">검증 추가</button>
-        <button id="wait-btn" class="toolbar-btn">대기 추가</button>
+        <div class="action-menu-wrapper">
+          <button id="action-btn" class="toolbar-btn">Action 추가 ▼</button>
+          <div id="action-menu" class="action-menu hidden">
+            <div class="action-menu-category">
+              <div class="action-menu-header">상호작용</div>
+              <button data-action-type="interaction" data-action="click">클릭</button>
+              <button data-action-type="interaction" data-action="doubleClick">더블 클릭</button>
+              <button data-action-type="interaction" data-action="rightClick">우클릭</button>
+              <button data-action-type="interaction" data-action="hover">호버</button>
+              <button data-action-type="interaction" data-action="type">입력</button>
+              <button data-action-type="interaction" data-action="clear">입력 필드 비우기</button>
+              <button data-action-type="interaction" data-action="select">드롭다운 선택</button>
+            </div>
+            <div class="action-menu-category">
+              <div class="action-menu-header">검증</div>
+              <button data-action-type="verify" data-action="verifyText">텍스트 검증</button>
+              <button data-action-type="verify" data-action="verifyElementPresent">요소 존재 검증</button>
+              <button data-action-type="verify" data-action="verifyElementNotPresent">요소 부재 검증</button>
+              <button data-action-type="verify" data-action="verifyTitle">타이틀 검증</button>
+              <button data-action-type="verify" data-action="verifyUrl">URL 검증</button>
+            </div>
+            <div class="action-menu-category">
+              <div class="action-menu-header">대기</div>
+              <button data-action-type="wait" data-action="waitForElement">요소 대기</button>
+              <button data-action-type="wait" data-action="wait">시간 대기</button>
+            </div>
+          </div>
+        </div>
         <button id="overlay-toggle-btn" class="toolbar-btn" aria-pressed="false">오버레이 표시</button>
         <button id="reset-btn" class="toolbar-btn">초기화</button>
       </div>

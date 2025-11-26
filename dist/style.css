@@ -31,6 +31,15 @@ select:focus{outline:none;border-color:#0ea5a0;box-shadow:0 0 0 2px rgba(14,165,
 #main{display:flex;flex-direction:column;gap:12px;align-items:stretch}
 .toolbar{margin-left:auto;margin-right:auto}
 .toolbar-row.buttons .toolbar-btn{min-width:140px}
+.action-menu-wrapper{position:relative;display:inline-block;flex:1}
+.action-menu-wrapper .toolbar-btn{min-width:140px}
+.action-menu{position:absolute;top:100%;left:0;margin-top:4px;background:#fff;border:1px solid #d0d0d0;border-radius:10px;box-shadow:0 8px 24px rgba(15,23,42,0.15);z-index:1000;min-width:220px;max-height:400px;overflow-y:auto}
+.action-menu-category{padding:4px 0;border-bottom:1px solid #e0e6f0}
+.action-menu-category:last-child{border-bottom:none}
+.action-menu-header{padding:8px 12px;font-weight:600;font-size:11px;color:#555;text-transform:uppercase;background:#f6f7fb;letter-spacing:0.5px}
+.action-menu button{display:block;width:100%;padding:10px 12px;text-align:left;border:none;background:#fff;cursor:pointer;font-size:13px;transition:background 0.15s ease;color:#222}
+.action-menu button:hover{background:#f4f6fb}
+.action-menu button:active{background:#eef1f8}
 @media (max-width:900px){
   .toolbar-inner{gap:10px}
   .toolbar-row.buttons{flex-wrap:wrap}
