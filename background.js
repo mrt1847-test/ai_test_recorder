@@ -669,24 +669,38 @@ async function handleAiCodeReviewRequest(message, sendResponse) {
 // ==================== WebSocket 연결 관리 ====================
 
 let wsConnection = null;
-const WS_RECONNECT_DELAY = 3000; // 3초
+let wsReconnectAttempts = 0;
+const WS_MAX_RECONNECT_ATTEMPTS = 5; // 최대 재연결 시도 횟수
+const WS_RECONNECT_DELAY = 5000; // 5초 (연결 실패 시 재시도 간격 증가)
 const WS_URL = 'ws://localhost:3000'; // Local API Server WebSocket 주소
 
 /**
  * WebSocket 연결 초기화 및 재연결 로직
+ * 연결 실패해도 확장 프로그램은 정상 작동 (선택사항)
  */
 function initWebSocket() {
+  // 이미 연결되어 있으면 중단
   if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
     console.log('[Background] WebSocket 이미 연결됨');
     return;
   }
+  
+  // 최대 재연결 시도 횟수 초과 시 재연결 중단
+  if (wsReconnectAttempts >= WS_MAX_RECONNECT_ATTEMPTS) {
+    console.warn('[Background] WebSocket 최대 재연결 시도 횟수 도달. 연결을 중단합니다.');
+    return;
+  }
 
   try {
-    console.log('[Background] WebSocket 연결 시도:', WS_URL);
+    // 첫 번째 연결 시도일 때만 로그
+    if (wsReconnectAttempts === 0) {
+      console.log('[Background] WebSocket 연결 시도:', WS_URL);
+    }
     wsConnection = new WebSocket(WS_URL);
 
     wsConnection.onopen = () => {
       console.log('[Background] ✅ WebSocket 연결 성공');
+      wsReconnectAttempts = 0; // 재연결 성공 시 카운터 리셋
       // 연결 성공 시 Extension ID 전송 (선택적)
       sendWebSocketMessage({
         type: 'extension_connected',
@@ -706,24 +720,48 @@ function initWebSocket() {
     };
 
     wsConnection.onerror = (error) => {
-      console.error('[Background] WebSocket 에러:', error);
+      // 에러는 onclose에서 처리되므로 여기서는 로그하지 않음
+      // 브라우저 콘솔에 에러가 표시되지만, 이것은 정상적인 상황일 수 있음
     };
 
-    wsConnection.onclose = () => {
-      console.log('[Background] WebSocket 연결 종료, 재연결 시도 중...');
+    wsConnection.onclose = (event) => {
       wsConnection = null;
-      // 재연결 시도
-      setTimeout(() => {
-        initWebSocket();
-      }, WS_RECONNECT_DELAY);
+      
+      // 연결이 거부된 경우 (서버가 없음)
+      if (event.code === 1006 || event.code === 1000) {
+        if (wsReconnectAttempts === 0) {
+          // 첫 번째 연결 실패 시에만 로그
+          console.log('[Background] WebSocket 서버에 연결할 수 없습니다. (Local API Server가 실행되지 않았을 수 있습니다)');
+          console.log('[Background] WebSocket이 없어도 다른 기능은 정상 작동합니다.');
+        }
+      }
+      
+      // 정상 종료(1000)가 아니고, 재연결 시도 횟수가 남아있을 때만 재연결
+      if (event.code !== 1000 && wsReconnectAttempts < WS_MAX_RECONNECT_ATTEMPTS) {
+        wsReconnectAttempts++;
+        const delay = WS_RECONNECT_DELAY * wsReconnectAttempts;
+        // 재연결 시도는 조용히 (로그 최소화)
+        setTimeout(() => {
+          initWebSocket();
+        }, delay);
+      } else if (wsReconnectAttempts >= WS_MAX_RECONNECT_ATTEMPTS) {
+        // 최대 시도 횟수 도달 시 한 번만 로그
+        console.log('[Background] WebSocket 재연결을 중단했습니다. Local API Server가 실행되면 자동으로 연결됩니다.');
+      }
     };
 
   } catch (error) {
-    console.error('[Background] WebSocket 연결 실패:', error);
-    // 재연결 시도
-    setTimeout(() => {
-      initWebSocket();
-    }, WS_RECONNECT_DELAY);
+    // WebSocket 생성 실패는 드문 경우이므로 로그만 남김
+    wsConnection = null;
+    
+    // 최대 시도 횟수 내에서만 재연결 (조용히)
+    if (wsReconnectAttempts < WS_MAX_RECONNECT_ATTEMPTS) {
+      wsReconnectAttempts++;
+      const delay = WS_RECONNECT_DELAY * wsReconnectAttempts;
+      setTimeout(() => {
+        initWebSocket();
+      }, delay);
+    }
   }
 }
 

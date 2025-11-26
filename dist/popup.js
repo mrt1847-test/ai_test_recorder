@@ -42,6 +42,7 @@ const codeReviewSummaryEl = document.getElementById('code-review-summary');
 const codeReviewDiffEl = document.getElementById('code-review-diff');
 const tcIdInput = document.getElementById('tc-id-input');
 const projectIdInput = document.getElementById('project-id-input');
+const sendRecordingBtn = document.getElementById('send-recording-btn');
 let recording = false;
 let selectedFramework = 'playwright';
 let selectedLanguage = 'python';
@@ -1077,6 +1078,123 @@ startBtn.addEventListener('click', ()=>{
 stopBtn.addEventListener('click', ()=>{
   triggerStopRecording({source: 'panel'});
 });
+
+// TestArchitect로 전송 버튼
+if (sendRecordingBtn) {
+  sendRecordingBtn.addEventListener('click', () => {
+    handleSendRecording();
+  });
+}
+
+/**
+ * TestArchitect로 녹화 데이터 전송
+ */
+function handleSendRecording() {
+  // TC ID와 Project ID 가져오기
+  const tcId = tcIdInput ? parseInt(tcIdInput.value) || null : null;
+  const projectId = projectIdInput ? parseInt(projectIdInput.value) || 1 : 1;
+  
+  if (!tcId) {
+    alert('테스트 케이스 ID(tcId)를 입력해주세요.');
+    return;
+  }
+  
+  // 버튼 비활성화
+  if (sendRecordingBtn) {
+    sendRecordingBtn.disabled = true;
+    sendRecordingBtn.textContent = '전송 중...';
+  }
+  
+  // 이벤트 가져오기
+  chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
+    const events = (res && res.events) || [];
+    
+    // 수동 액션 가져오기 (loadManualActions 함수 사용)
+    loadManualActions((loadedManualActions) => {
+      try {
+        // 코드 생성
+        const testPurpose = document.getElementById('test-purpose') ? document.getElementById('test-purpose').value || '' : '';
+        const testUrl = document.getElementById('test-url') ? document.getElementById('test-url').value || '' : '';
+        const normalizedEvents = events.map(normalizeEventRecord);
+        const code = generateCode(normalizedEvents, loadedManualActions, selectedFramework, selectedLanguage);
+        
+        // 세션 ID 생성 또는 저장된 값 사용
+        chrome.storage.local.get(['testArchitectParams'], (paramsResult) => {
+          const params = paramsResult.testArchitectParams || {};
+          const sessionId = params.sessionId || `session-${Date.now()}`;
+          
+          // 전송할 데이터 구성
+          const recordingData = {
+            type: 'recording_complete',
+            sessionId: sessionId,
+            tcId: tcId,
+            projectId: projectId,
+            events: normalizedEvents,
+            manualActions: loadedManualActions,
+            code: {
+              [selectedLanguage]: {
+                framework: selectedFramework,
+                code: code
+              }
+            },
+            metadata: {
+              testCase: testPurpose,
+              testUrl: testUrl,
+              framework: selectedFramework,
+              language: selectedLanguage,
+              startTime: events.length > 0 ? (events[0].timestamp || Date.now()) : Date.now(),
+              endTime: events.length > 0 ? (events[events.length - 1].timestamp || Date.now()) : Date.now(),
+              timestamp: Date.now()
+            }
+          };
+          
+          // TestArchitect API로 전송
+          fetch('http://localhost:3000/api/recording', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(recordingData)
+          })
+          .then(response => {
+            if (!response.ok) {
+              return response.text().then(text => {
+                throw new Error(`HTTP ${response.status}: ${text}`);
+              });
+            }
+            return response.json();
+          })
+          .then(result => {
+            if (result.success) {
+              alert(`녹화 데이터가 성공적으로 전송되었습니다.\nTC ID: ${result.tcId || tcId}\nScript ID: ${result.scriptId || 'N/A'}`);
+            } else {
+              throw new Error(result.error || 'Unknown error');
+            }
+          })
+          .catch(error => {
+            console.error('전송 실패:', error);
+            alert(`전송 실패: ${error.message}`);
+          })
+          .finally(() => {
+            // 버튼 활성화
+            if (sendRecordingBtn) {
+              sendRecordingBtn.disabled = false;
+              sendRecordingBtn.textContent = 'TestArchitect로 전송';
+            }
+          });
+        });
+      } catch (error) {
+        console.error('데이터 변환 오류:', error);
+        alert(`데이터 변환 실패: ${error.message}`);
+        // 버튼 활성화
+        if (sendRecordingBtn) {
+          sendRecordingBtn.disabled = false;
+          sendRecordingBtn.textContent = 'TestArchitect로 전송';
+        }
+      }
+    });
+  });
+}
 
 resetBtn.addEventListener('click', () => {
   // 전체 삭제
