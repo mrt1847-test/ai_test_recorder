@@ -2970,6 +2970,58 @@
 
   // src/content/init.js
   var GLOBAL_FLAG = "__ai_test_recorder_loaded";
+  function extractAndSaveUrlParams() {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const tcId = urlParams.get("tcId");
+      const projectId = urlParams.get("projectId");
+      const sessionId = urlParams.get("sessionId");
+      if (tcId || projectId) {
+        const params = {
+          tcId: tcId || null,
+          projectId: projectId || null,
+          sessionId: sessionId || null,
+          url: window.location.href,
+          timestamp: Date.now()
+        };
+        chrome.storage.local.set({
+          testArchitectParams: params
+        });
+        window.testArchitectParams = params;
+        console.log("[Content Script] URL \uD30C\uB77C\uBBF8\uD130 \uC800\uC7A5:", params);
+      }
+      if (window.testArchitectParams && typeof window.testArchitectParams === "object") {
+        const params = window.testArchitectParams;
+        chrome.storage.local.set({
+          testArchitectParams: {
+            tcId: params.tcId || null,
+            projectId: params.projectId || null,
+            sessionId: params.sessionId || null,
+            url: window.location.href,
+            timestamp: Date.now()
+          }
+        });
+        console.log("[Content Script] \uC804\uC5ED \uBCC0\uC218\uC5D0\uC11C \uD30C\uB77C\uBBF8\uD130 \uC800\uC7A5:", params);
+      }
+      window.addEventListener("testarchitect-params-ready", (event) => {
+        const params = event.detail || {};
+        if (params.tcId || params.projectId) {
+          chrome.storage.local.set({
+            testArchitectParams: {
+              tcId: params.tcId || null,
+              projectId: params.projectId || null,
+              sessionId: params.sessionId || null,
+              url: window.location.href,
+              timestamp: Date.now()
+            }
+          });
+          console.log("[Content Script] \uCEE4\uC2A4\uD140 \uC774\uBCA4\uD2B8\uC5D0\uC11C \uD30C\uB77C\uBBF8\uD130 \uC800\uC7A5:", params);
+        }
+      }, { once: false });
+    } catch (error) {
+      console.error("[Content Script] URL \uD30C\uB77C\uBBF8\uD130 \uCD94\uCD9C \uC2E4\uD328:", error);
+    }
+  }
   function restoreRecordingState() {
     chrome.storage.local.get(["recording"], (result) => {
       if (result.recording) {
@@ -2987,6 +3039,17 @@
   function initializeContentScript() {
     if (window[GLOBAL_FLAG]) return;
     window[GLOBAL_FLAG] = true;
+    extractAndSaveUrlParams();
+    let lastUrl2 = window.location.href;
+    const urlCheckInterval2 = setInterval(() => {
+      if (window.location.href !== lastUrl2) {
+        lastUrl2 = window.location.href;
+        extractAndSaveUrlParams();
+      }
+    }, 500);
+    window.addEventListener("beforeunload", () => {
+      clearInterval(urlCheckInterval2);
+    });
     initOverlaySystem();
     initRecorderListeners();
     initSelectionInterceptors();

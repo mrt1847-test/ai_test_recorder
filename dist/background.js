@@ -666,9 +666,161 @@ async function handleAiCodeReviewRequest(message, sendResponse) {
   }
 }
 
+// ==================== WebSocket 연결 관리 ====================
+
+let wsConnection = null;
+const WS_RECONNECT_DELAY = 3000; // 3초
+const WS_URL = 'ws://localhost:3000'; // Local API Server WebSocket 주소
+
+/**
+ * WebSocket 연결 초기화 및 재연결 로직
+ */
+function initWebSocket() {
+  if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+    console.log('[Background] WebSocket 이미 연결됨');
+    return;
+  }
+
+  try {
+    console.log('[Background] WebSocket 연결 시도:', WS_URL);
+    wsConnection = new WebSocket(WS_URL);
+
+    wsConnection.onopen = () => {
+      console.log('[Background] ✅ WebSocket 연결 성공');
+      // 연결 성공 시 Extension ID 전송 (선택적)
+      sendWebSocketMessage({
+        type: 'extension_connected',
+        extensionId: chrome.runtime.id,
+        version: EXTENSION_VERSION
+      });
+    };
+
+    wsConnection.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        console.log('[Background] WebSocket 메시지 수신:', message);
+        handleWebSocketMessage(message);
+      } catch (error) {
+        console.error('[Background] WebSocket 메시지 파싱 실패:', error, 'Raw data:', event.data);
+      }
+    };
+
+    wsConnection.onerror = (error) => {
+      console.error('[Background] WebSocket 에러:', error);
+    };
+
+    wsConnection.onclose = () => {
+      console.log('[Background] WebSocket 연결 종료, 재연결 시도 중...');
+      wsConnection = null;
+      // 재연결 시도
+      setTimeout(() => {
+        initWebSocket();
+      }, WS_RECONNECT_DELAY);
+    };
+
+  } catch (error) {
+    console.error('[Background] WebSocket 연결 실패:', error);
+    // 재연결 시도
+    setTimeout(() => {
+      initWebSocket();
+    }, WS_RECONNECT_DELAY);
+  }
+}
+
+/**
+ * WebSocket을 통해 메시지 전송
+ */
+function sendWebSocketMessage(message) {
+  if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+    try {
+      wsConnection.send(JSON.stringify(message));
+      console.log('[Background] WebSocket 메시지 전송:', message);
+      return true;
+    } catch (error) {
+      console.error('[Background] WebSocket 메시지 전송 실패:', error);
+      return false;
+    }
+  } else {
+    console.warn('[Background] WebSocket이 연결되지 않아 메시지 전송 실패:', message);
+    return false;
+  }
+}
+
+/**
+ * WebSocket으로 받은 메시지 처리
+ */
+function handleWebSocketMessage(message) {
+  if (!message || !message.type) {
+    console.warn('[Background] 잘못된 WebSocket 메시지:', message);
+    return;
+  }
+
+  switch (message.type) {
+    case 'OPEN_POPUP':
+      // 팝업 열기
+      chrome.windows.create({
+        url: chrome.runtime.getURL('popup.html'),
+        type: 'popup',
+        width: 1220,
+        height: 850,
+        focused: true
+      }, (window) => {
+        if (chrome.runtime.lastError) {
+          console.error('[Background] 창 열기 실패:', chrome.runtime.lastError);
+          sendWebSocketMessage({
+            type: 'OPEN_POPUP_RESPONSE',
+            success: false,
+            error: chrome.runtime.lastError.message
+          });
+        } else {
+          console.log('[Background] 새 창이 열렸습니다. Window ID:', window.id);
+          sendWebSocketMessage({
+            type: 'OPEN_POPUP_RESPONSE',
+            success: true,
+            windowId: window.id
+          });
+        }
+      });
+      break;
+
+    case 'START_RECORDING':
+      // 녹화 시작 (필요한 경우)
+      // 현재는 popup에서 처리하므로 여기서는 알림만
+      sendWebSocketMessage({
+        type: 'START_RECORDING_RESPONSE',
+        message: '녹화는 팝업에서 시작해주세요'
+      });
+      break;
+
+    case 'PING':
+      // 연결 확인
+      sendWebSocketMessage({
+        type: 'PONG',
+        timestamp: Date.now()
+      });
+      break;
+
+    default:
+      console.warn('[Background] 알 수 없는 WebSocket 메시지 타입:', message.type);
+      sendWebSocketMessage({
+        type: 'ERROR',
+        message: `Unknown message type: ${message.type}`
+      });
+  }
+}
+
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('AI Test Recorder installed');
+  console.log('[Background] AI Test Recorder 설치됨');
+  initWebSocket();
 });
+
+chrome.runtime.onStartup.addListener(() => {
+  console.log('[Background] Chrome 시작 시 WebSocket 연결');
+  initWebSocket();
+});
+
+// Background Script가 활성화될 때 WebSocket 연결
+initWebSocket();
 
 // 확장 프로그램 아이콘 클릭 시 새 창 열기
 chrome.action.onClicked.addListener(() => {
@@ -769,16 +921,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // 외부에서 오는 메시지 처리 (자동화 툴에서 호출)
 chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
+  console.log('[Background] 외부 메시지 수신:', msg, 'from:', sender?.url, 'origin:', sender?.origin);
+  
   if (msg && msg.type === 'OPEN_POPUP') {
-    // 새 탭에서 팝업 열기
-    chrome.tabs.create({
+    // sendResponse는 리스너가 반환되기 전에 호출되어야 함
+    // 비동기 작업은 별도로 처리하고 즉시 응답 반환
+    const response = { ok: true, extensionId: chrome.runtime.id };
+    console.log('[Background] OPEN_POPUP 요청 처리 시작, 즉시 응답:', response);
+    
+    // 즉시 응답 반환 (sendResponse는 리스너가 종료되기 전에 호출되어야 함)
+    sendResponse(response);
+    
+    // chrome.tabs.create()는 popup.html을 직접 열 수 없으므로
+    // chrome.windows.create()를 사용하여 새 창으로 열기
+    chrome.windows.create({
       url: chrome.runtime.getURL('popup.html'),
-      active: true
-    }, (tab) => {
+      type: 'popup',
+      width: 1220,
+      height: 850,
+      focused: true
+    }, (window) => {
       if (chrome.runtime.lastError) {
-        sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+        console.error('[Background] 창 열기 실패:', chrome.runtime.lastError);
         return;
       }
+      
+      console.log('[Background] 새 창이 열렸습니다. Window ID:', window.id);
       
       // content script 자동 주입 (활성 탭이 있는 경우)
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -794,24 +962,28 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
               files: ['content.js']
             }, () => {
               if (chrome.runtime.lastError) {
-                console.warn('Content script injection failed:', chrome.runtime.lastError);
+                console.warn('[Background] Content script 주입 실패:', chrome.runtime.lastError);
               } else {
                 injectedTabs.add(activeTab.id);
+                console.log('[Background] Content script 주입 성공:', activeTab.id);
               }
             });
           }
         }
       });
-      
-      sendResponse({ ok: true, tabId: tab.id, extensionId: chrome.runtime.id });
     });
+    
     return true; // 비동기 응답을 위해 true 반환
   }
   
   if (msg && msg.type === 'GET_EXTENSION_ID') {
-    sendResponse({ extensionId: chrome.runtime.id });
+    const response = { extensionId: chrome.runtime.id };
+    console.log('[Background] GET_EXTENSION_ID 요청, 응답:', response);
+    sendResponse(response);
     return true;
   }
   
+  console.warn('[Background] 알 수 없는 메시지 타입:', msg?.type);
+  sendResponse({ ok: false, error: 'Unknown message type' });
   return false;
 });

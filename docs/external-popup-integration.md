@@ -275,20 +275,130 @@ http://localhost:3000/record?tcId=8&projectId=1&sessionId=session-1764165096712
 1. **확장 프로그램 ID 확인**
    - `chrome://extensions/`에서 확장 프로그램 ID 확인
    - 코드에서 사용하는 ID가 정확한지 확인
+   - 확장 프로그램 ID가 변경되었을 수 있으므로 정기적으로 확인 필요
 
 2. **확장 프로그램 활성화 확인**
    - 확장 프로그램이 비활성화되어 있지 않은지 확인
+   - 확장 프로그램이 제대로 설치되어 있는지 확인
 
 3. **도메인 확인**
    - `manifest.json`의 `externally_connectable.matches`에 현재 도메인이 포함되어 있는지 확인
    - `http://localhost:3000`은 지원되지만 다른 포트나 도메인은 추가 설정이 필요할 수 있습니다.
+   - 포트 번호가 다른 경우 (예: `localhost:3001`) manifest.json에 추가 필요
 
-4. **콘솔 에러 확인**
+4. **메시지 전송 확인**
    - 브라우저 개발자 도구 콘솔에서 에러 메시지 확인
+   - 확장 프로그램의 Service Worker 콘솔 확인:
+     - `chrome://extensions/` → "AI Test Recorder" → "Service Worker" 클릭
+     - 콘솔에 `[Background] 외부 메시지 수신:` 로그가 보이는지 확인
+
+5. **확장 프로그램 재로드**
+   - 확장 프로그램을 다시 로드해보기
+   - `chrome://extensions/`에서 확장 프로그램 카드의 새로고침 버튼 클릭
+
+### "확장 프로그램이 응답하지 않음" 오류
+
+이 오류가 발생하는 주요 원인:
+
+1. **확장 프로그램 ID 오류**
+   ```javascript
+   // 잘못된 ID 사용
+   chrome.runtime.sendMessage('wrong-id', { type: 'OPEN_POPUP' }, ...);
+   
+   // 올바른 방법: 실제 확장 프로그램 ID 확인
+   const extensionId = 'abcdefghijklmnopqrstuvwxyz123456'; // 실제 ID로 교체
+   ```
+
+2. **확장 프로그램이 비활성화됨**
+   - `chrome://extensions/`에서 확장 프로그램이 활성화되어 있는지 확인
+
+3. **도메인 불일치**
+   - 현재 페이지의 도메인이 `externally_connectable.matches`에 포함되어 있는지 확인
+   - 예: `http://localhost:3001`에서 접근하는 경우 manifest.json에 추가 필요
+
+4. **타이밍 문제**
+   - 페이지 로드 직후 메시지를 보내면 확장 프로그램이 아직 준비되지 않았을 수 있음
+   - `DOMContentLoaded` 또는 `window.load` 이벤트 후에 메시지 전송
+
+### 디버깅 방법
+
+#### 1. 확장 프로그램 Service Worker 콘솔 확인
+```
+1. chrome://extensions/ 접속
+2. "AI Test Recorder - UI Pro" 찾기
+3. "Service Worker" 링크 클릭
+4. 콘솔에서 [Background]로 시작하는 로그 확인
+```
+
+#### 2. 자동화 툴 콘솔에서 테스트
+```javascript
+// 콘솔에서 직접 테스트
+const extensionId = 'YOUR_EXTENSION_ID'; // 실제 ID로 교체
+
+chrome.runtime.sendMessage(
+  extensionId,
+  { type: 'GET_EXTENSION_ID' },
+  (response) => {
+    if (chrome.runtime.lastError) {
+      console.error('에러:', chrome.runtime.lastError);
+    } else {
+      console.log('성공:', response);
+    }
+  }
+);
+```
+
+#### 3. 메시지 전송 함수 개선
+```javascript
+async function sendMessageWithRetry(extensionId, message, maxRetries = 3) {
+  return new Promise((resolve, reject) => {
+    let attempts = 0;
+    
+    function trySend() {
+      attempts++;
+      
+      chrome.runtime.sendMessage(extensionId, message, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error(`[시도 ${attempts}/${maxRetries}] 에러:`, chrome.runtime.lastError);
+          
+          if (attempts < maxRetries) {
+            // 재시도
+            setTimeout(trySend, 500);
+          } else {
+            reject(new Error(`메시지 전송 실패: ${chrome.runtime.lastError.message}`));
+          }
+          return;
+        }
+        
+        if (response && response.ok) {
+          resolve(response);
+        } else {
+          reject(new Error('응답이 실패했습니다.'));
+        }
+      });
+    }
+    
+    trySend();
+  });
+}
+
+// 사용 예제
+try {
+  const extensionId = 'YOUR_EXTENSION_ID';
+  const response = await sendMessageWithRetry(
+    extensionId,
+    { type: 'OPEN_POPUP' }
+  );
+  console.log('팝업 열기 성공:', response);
+} catch (error) {
+  console.error('팝업 열기 실패:', error);
+}
+```
 
 ### URL 파라미터가 설정되지 않는 경우
 
 1. **URL 형식 확인**: 쿼리 파라미터가 올바르게 포함되어 있는지 확인
 2. **입력 필드 확인**: 이미 값이 입력되어 있으면 자동 설정되지 않습니다 (기존 값 보존)
 3. **팝업 로딩 시간**: URL 이동 후 팝업이 열릴 때까지 약간의 지연이 필요할 수 있습니다.
+
 

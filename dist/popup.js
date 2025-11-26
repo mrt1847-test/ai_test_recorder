@@ -40,7 +40,6 @@ const aiReviewStatusEl = document.getElementById('ai-review-status');
 const aiReviewHelpEl = document.getElementById('ai-review-help');
 const codeReviewSummaryEl = document.getElementById('code-review-summary');
 const codeReviewDiffEl = document.getElementById('code-review-diff');
-const sendRecordingBtn = document.getElementById('send-recording-btn');
 const tcIdInput = document.getElementById('tc-id-input');
 const projectIdInput = document.getElementById('project-id-input');
 let recording = false;
@@ -780,6 +779,51 @@ function sendMessageWithInjection(tabId, message, callback) {
     });
 }
 
+// URL에서 쿼리 파라미터 추출 함수
+function extractUrlParams(url) {
+  if (!url) return {};
+  try {
+    const urlObj = new URL(url);
+    const params = {};
+    urlObj.searchParams.forEach((value, key) => {
+      params[key] = value;
+    });
+    return params;
+  } catch (e) {
+    // URL 파싱 실패 시 빈 객체 반환
+    return {};
+  }
+}
+
+// URL에서 tcId와 projectId를 추출하여 입력 필드에 자동 설정
+function autoFillIdsFromUrl(url) {
+  if (!url) return;
+  
+  const params = extractUrlParams(url);
+  
+  // tcId 파라미터 추출 (tcId 또는 tc_id 등 다양한 형식 지원)
+  const tcId = params.tcId || params.tc_id || params.testCaseId;
+  if (tcId && tcIdInput) {
+    const tcIdNum = parseInt(tcId, 10);
+    if (!isNaN(tcIdNum) && tcIdNum > 0 && !tcIdInput.value) {
+      // 입력 필드가 비어 있을 때만 자동 설정
+      tcIdInput.value = tcIdNum;
+    }
+  }
+  
+  // projectId 파라미터 추출 (projectId 또는 project_id 등 다양한 형식 지원)
+  const projectId = params.projectId || params.project_id || params.projectid;
+  if (projectId && projectIdInput) {
+    const projectIdNum = parseInt(projectId, 10);
+    if (!isNaN(projectIdNum) && projectIdNum > 0) {
+      // 입력 필드가 비어 있거나 기본값일 때만 자동 설정
+      if (!projectIdInput.value || projectIdInput.value === '1') {
+        projectIdInput.value = projectIdNum;
+      }
+    }
+  }
+}
+
 function withActiveTab(callback) {
   const deliverTab = (tab) => {
     if (!tab) {
@@ -1033,12 +1077,6 @@ startBtn.addEventListener('click', ()=>{
 stopBtn.addEventListener('click', ()=>{
   triggerStopRecording({source: 'panel'});
 });
-
-if (sendRecordingBtn) {
-  sendRecordingBtn.addEventListener('click', () => {
-    handleSendRecording();
-  });
-}
 
 resetBtn.addEventListener('click', () => {
   // 전체 삭제
@@ -6034,442 +6072,94 @@ function generateCode(events, manualList, framework, language) {
   return lines.join('\n');
 }
 
-// ==================== TestArchitect 데이터 전송 기능 ====================
-
-/**
- * 유일성이 확보된 셀렉터만 필터링
- */
-function getUniqueSelectors(selectorCandidates) {
-  if (!Array.isArray(selectorCandidates) || selectorCandidates.length === 0) {
-    return [];
+// 팝업이 열릴 때 현재 활성 탭의 URL에서 tcId와 projectId 자동 추출
+(function initAutoFillFromUrl() {
+  // DOM이 로드될 때까지 기다린 후 실행
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', checkAndAutoFillIds);
+  } else {
+    // 이미 로드된 경우 즉시 실행
+    checkAndAutoFillIds();
   }
   
-  // 유일성이 확보된 셀렉터만 필터링 (unique === true)
-  const uniqueSelectors = selectorCandidates.filter(candidate => {
-    return candidate && candidate.unique === true && candidate.selector;
-  });
-  
-  // 유일한 셀렉터가 없으면 점수가 높은 셀렉터 중 최상위 하나만 반환
-  if (uniqueSelectors.length === 0) {
-    const sorted = [...selectorCandidates]
-      .filter(c => c && c.selector)
-      .sort((a, b) => (b.score || 0) - (a.score || 0));
-    return sorted.length > 0 ? [sorted[0]] : [];
-  }
-  
-  // 점수 순으로 정렬하여 반환
-  return uniqueSelectors.sort((a, b) => (b.score || 0) - (a.score || 0));
-}
-
-/**
- * 셀렉터를 문서 스펙 형식으로 변환
- */
-function buildSelectorObject(selectorCandidate) {
-  if (!selectorCandidate || !selectorCandidate.selector) {
-    return {};
-  }
-  
-  const selector = selectorCandidate.selector;
-  const type = selectorCandidate.type || inferSelectorType(selector);
-  
-  const selectors = {};
-  
-  // 셀렉터 타입에 따라 적절한 필드에 할당
-  if (type === 'id') {
-    let idValue = selector.startsWith('#') ? selector.slice(1) : selector;
-    // css= 접두사 제거
-    if (idValue.startsWith('css=')) {
-      idValue = idValue.slice(4);
-      if (idValue.startsWith('#')) {
-        idValue = idValue.slice(1);
-      }
-    }
-    selectors.id = `#${idValue}`;
-    // CSS 셀렉터로도 추가
-    selectors.css = `#${idValue}`;
-  } else if (type === 'css' || type === 'class' || type === 'class-tag') {
-    let cssValue = selector.startsWith('css=') ? selector.slice(4) : selector;
-    // #으로 시작하면 id로도 추가
-    if (cssValue.startsWith('#')) {
-      selectors.id = cssValue;
-    }
-    selectors.css = cssValue;
-  } else if (type === 'xpath' || type === 'xpath-full') {
-    let xpathValue = selector.startsWith('xpath=') ? selector.slice(6) : selector;
-    // //로 시작하지 않으면 추가
-    if (!xpathValue.startsWith('//') && !xpathValue.startsWith('/')) {
-      xpathValue = '//' + xpathValue;
-    }
-    selectors.xpath = xpathValue;
-  } else if (type === 'text') {
-    const textValue = selectorCandidate.textValue || getTextValue({ selector });
-    if (textValue) {
-      // XPath 텍스트 셀렉터
-      selectors.text = `//*[text()='${textValue}']`;
-      selectors.xpath = `//*[text()='${textValue}']`;
-    }
-  }
-  
-  // data-testid 등 속성 기반 셀렉터 처리
-  if (type && type.startsWith('data-')) {
-    const attrName = type;
-    const attrValue = extractAttributeValue(selector, attrName);
-    if (attrValue) {
-      selectors.dataTestId = `[${attrName}="${attrValue}"]`;
-      // CSS 셀렉터로도 추가
-      if (!selectors.css) {
-        selectors.css = `[${attrName}="${attrValue}"]`;
-      }
-    }
-  }
-  
-  // name 속성 처리
-  if (type === 'name') {
-    const nameValue = extractAttributeValue(selector, 'name');
-    if (nameValue) {
-      selectors.name = `[name="${nameValue}"]`;
-      // CSS 셀렉터로도 추가
-      if (!selectors.css) {
-        selectors.css = `[name="${nameValue}"]`;
-      }
-    }
-  }
-  
-  return selectors;
-}
-
-/**
- * 이벤트를 문서 스펙 형식으로 변환
- */
-function convertEventToSpecFormat(event) {
-  if (!event) return null;
-  
-  // 액션 타입 매핑
-  const actionTypeMap = {
-    'click': 'click',
-    'doubleClick': 'dblclick',
-    'rightClick': 'click', // 우클릭도 click으로 처리
-    'input': 'type',
-    'type': 'type',
-    'clear': 'type',
-    'goto': 'navigate',
-    'select': 'select',
-    'hover': 'hover',
-    'verifyText': 'assert',
-    'verifyElementPresent': 'assert',
-    'verifyElementNotPresent': 'assert',
-    'verifyTitle': 'assert',
-    'verifyUrl': 'assert',
-    'waitForElement': 'wait',
-    'wait': 'wait'
-  };
-  
-  const eventType = actionTypeMap[event.action] || event.action;
-  
-  // 유일성이 확보된 셀렉터만 사용
-  const uniqueSelectors = getUniqueSelectors(event.selectorCandidates || []);
-  
-  // Target 객체 생성
-  let target = null;
-  if (event.target || uniqueSelectors.length > 0) {
-    const bestSelector = uniqueSelectors.length > 0 ? uniqueSelectors[0] : null;
-    const selectorObj = bestSelector ? buildSelectorObject(bestSelector) : {};
-    
-    target = {
-      tagName: event.target?.tag || event.tag || null,
-      id: event.target?.id || null,
-      className: Array.isArray(event.target?.classes) 
-        ? event.target.classes.join(' ') 
-        : (event.target?.classes || null),
-      type: event.target?.type || null,
-      text: event.target?.text || null,
-      selectors: selectorObj,
-      attributes: {}
-    };
-    
-    // attributes 추출 (data-testid 등)
-    if (bestSelector) {
-      const selector = bestSelector.selector || '';
-      const dataTestId = extractAttributeValue(selector, 'data-testid');
-      if (dataTestId) {
-        target.attributes['data-testid'] = dataTestId;
-      }
-      const ariaLabel = extractAttributeValue(selector, 'aria-label');
-      if (ariaLabel) {
-        target.attributes['aria-label'] = ariaLabel;
-      }
-    }
-    
-    // 빈 객체가 되면 null로
-    if (!target.tagName && !target.id && !target.className && 
-        Object.keys(target.selectors).length === 0) {
-      target = null;
-    }
-  }
-  
-  // URL 추출
-  const url = event.page?.url || event.url || '';
-  
-  // Viewport 정보 (기본값 사용, 실제로는 탭에서 가져와야 함)
-  // TODO: 실제 탭의 viewport 크기를 가져오도록 개선 필요
-  const viewport = {
-    width: window.screen ? window.screen.width : 1920,
-    height: window.screen ? window.screen.height : 1080
-  };
-  
-  // 이벤트별 특수 처리
-  const convertedEvent = {
-    id: `event-${event.timestamp || Date.now()}`,
-    type: eventType,
-    timestamp: event.timestamp || Date.now(),
-    target: target,
-    value: event.value || null,
-    url: url,
-    viewport: viewport
-  };
-  
-  // navigate 타입은 target이 null
-  if (eventType === 'navigate') {
-    convertedEvent.target = null;
-    convertedEvent.value = url;
-  }
-  
-  // wait 타입 처리
-  if (eventType === 'wait') {
-    if (event.action === 'waitForElement') {
-      convertedEvent.condition = 'visible';
-      convertedEvent.timeout = 5000;
-    } else if (event.action === 'wait') {
-      convertedEvent.condition = 'timeout';
-      convertedEvent.timeout = event.value || 1000;
-      convertedEvent.target = null;
-    }
-  }
-  
-  // assert 타입 처리
-  if (eventType === 'assert') {
-    if (event.action === 'verifyText') {
-      convertedEvent.assertion = 'text';
-      convertedEvent.expected = event.value || target?.text || '';
-    } else if (event.action === 'verifyElementPresent') {
-      convertedEvent.assertion = 'visible';
-    } else if (event.action === 'verifyElementNotPresent') {
-      convertedEvent.assertion = 'hidden';
-    } else if (event.action === 'verifyTitle') {
-      convertedEvent.assertion = 'text';
-      convertedEvent.target = null;
-      convertedEvent.expected = event.value || '';
-    } else if (event.action === 'verifyUrl') {
-      convertedEvent.assertion = 'attribute';
-      convertedEvent.target = null;
-      convertedEvent.expected = event.value || url;
-    }
-  }
-  
-  return convertedEvent;
-}
-
-/**
- * 세션 ID 생성
- */
-function generateSessionId() {
-  return `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-}
-
-/**
- * 브라우저 및 OS 정보 수집
- */
-function getBrowserMetadata() {
-  const userAgent = navigator.userAgent;
-  let browser = 'unknown';
-  let browserVersion = '0.0.0';
-  let os = 'unknown';
-  let osVersion = 'unknown';
-  
-  // 브라우저 감지
-  if (userAgent.includes('Chrome') && !userAgent.includes('Edg')) {
-    browser = 'chrome';
-    const match = userAgent.match(/Chrome\/(\d+)/);
-    if (match) browserVersion = `${match[1]}.0.0.0`;
-  } else if (userAgent.includes('Firefox')) {
-    browser = 'firefox';
-    const match = userAgent.match(/Firefox\/(\d+)/);
-    if (match) browserVersion = `${match[1]}.0.0`;
-  } else if (userAgent.includes('Safari') && !userAgent.includes('Chrome')) {
-    browser = 'safari';
-    const match = userAgent.match(/Version\/(\d+)/);
-    if (match) browserVersion = `${match[1]}.0`;
-  } else if (userAgent.includes('Edg')) {
-    browser = 'edge';
-    const match = userAgent.match(/Edg\/(\d+)/);
-    if (match) browserVersion = `${match[1]}.0.0.0`;
-  }
-  
-  // OS 감지
-  if (userAgent.includes('Windows')) {
-    os = 'Windows';
-    const match = userAgent.match(/Windows NT (\d+\.\d+)/);
-    if (match) {
-      const version = match[1];
-      if (version === '10.0') osVersion = '10';
-      else if (version === '6.3') osVersion = '8.1';
-      else if (version === '6.2') osVersion = '8';
-      else if (version === '6.1') osVersion = '7';
-      else osVersion = version;
-    }
-  } else if (userAgent.includes('Mac OS X')) {
-    os = 'macOS';
-    const match = userAgent.match(/Mac OS X (\d+[._]\d+)/);
-    if (match) osVersion = match[1].replace('_', '.');
-  } else if (userAgent.includes('Linux')) {
-    os = 'Linux';
-  }
-  
-  return {
-    browser,
-    browserVersion,
-    os,
-    osVersion,
-    userAgent
-  };
-}
-
-/**
- * 코드 객체 생성
- */
-function buildCodeObject(events, manualActions, framework, language) {
-  const code = generateCode(events, manualActions, framework, language);
-  
-  const codeObj = {};
-  
-  if (language === 'python' || language === 'python-class') {
-    codeObj.python = {
-      framework: framework,
-      code: code
-    };
-  }
-  
-  if (language === 'javascript' || language === 'typescript') {
-    codeObj.javascript = {
-      framework: framework,
-      code: code
-    };
-  }
-  
-  return codeObj;
-}
-
-/**
- * 녹화 데이터를 문서 스펙 형식으로 변환
- */
-function convertRecordingToSpecFormat(events, manualActions, sessionId, tcId, projectId) {
-  const normalizedEvents = Array.isArray(events) ? events.map(normalizeEventRecord) : [];
-  const convertedEvents = normalizedEvents
-    .map(convertEventToSpecFormat)
-    .filter(event => event !== null);
-  
-  // 시작/종료 시간 계산
-  const timestamps = convertedEvents.map(e => e.timestamp).filter(Boolean);
-  const startTime = timestamps.length > 0 ? Math.min(...timestamps) : Date.now();
-  const endTime = timestamps.length > 0 ? Math.max(...timestamps) : Date.now();
-  const duration = endTime - startTime;
-  
-  // 메타데이터 수집
-  const browserMetadata = getBrowserMetadata();
-  const metadata = {
-    ...browserMetadata,
-    startTime: startTime,
-    endTime: endTime,
-    duration: duration
-  };
-  
-  // 코드 객체 생성
-  const code = buildCodeObject(normalizedEvents, manualActions, selectedFramework, selectedLanguage);
-  
-  return {
-    type: 'recording_complete',
-    sessionId: sessionId,
-    tcId: tcId || null,
-    projectId: projectId || 1,
-    events: convertedEvents,
-    code: code,
-    metadata: metadata
-  };
-}
-
-/**
- * TestArchitect로 녹화 데이터 전송
- */
-async function sendRecordingData(recordingData) {
-  try {
-    const response = await fetch('http://localhost:3000/api/recording', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(recordingData)
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`HTTP ${response.status}: ${errorText}`);
-    }
-    
-    const result = await response.json();
-    
-    if (result.success) {
-      console.log('녹화 데이터가 성공적으로 저장되었습니다');
-      return result;
-    } else {
-      console.error('녹화 데이터 저장 실패:', result.error);
-      throw new Error(result.error || 'Unknown error');
-    }
-  } catch (error) {
-    console.error('전송 실패:', error);
-    throw error;
-  }
-}
-
-/**
- * 녹화 데이터 전송 처리
- */
-function handleSendRecording() {
-  const tcId = tcIdInput ? parseInt(tcIdInput.value) || null : null;
-  const projectId = projectIdInput ? parseInt(projectIdInput.value) || 1 : 1;
-  
-  if (!tcId) {
-    alert('테스트 케이스 ID(tcId)를 입력해주세요.');
-    return;
-  }
-  
-  chrome.runtime.sendMessage({type:'GET_EVENTS'}, async (res) => {
-    const events = (res && res.events) || [];
-    
-    loadManualActions((manualActions) => {
-      const sessionId = generateSessionId();
-      
-      try {
-        // 데이터 변환
-        const recordingData = convertRecordingToSpecFormat(
-          events,
-          manualActions,
-          sessionId,
-          tcId,
-          projectId
-        );
+  function checkAndAutoFillIds() {
+    // 1순위: chrome.storage에서 저장된 파라미터 읽기 (Content Script가 저장한 값)
+    chrome.storage.local.get(['testArchitectParams'], (result) => {
+      if (result.testArchitectParams) {
+        const params = result.testArchitectParams;
+        console.log('[Popup] 저장된 파라미터 읽기:', params);
         
-        // 전송
-        sendRecordingData(recordingData)
-          .then((result) => {
-            alert(`녹화 데이터가 성공적으로 전송되었습니다.\nTC ID: ${result.tcId || tcId}\nScript ID: ${result.scriptId || 'N/A'}`);
-          })
-          .catch((error) => {
-            alert(`전송 실패: ${error.message}`);
-          });
-      } catch (error) {
-        alert(`데이터 변환 실패: ${error.message}`);
-        console.error('데이터 변환 오류:', error);
+        // 입력 필드가 비어 있을 때만 설정
+        if (params.tcId && tcIdInput && !tcIdInput.value) {
+          const tcIdNum = parseInt(params.tcId, 10);
+          if (!isNaN(tcIdNum) && tcIdNum > 0) {
+            tcIdInput.value = tcIdNum;
+            console.log('[Popup] TC ID 자동 설정:', tcIdNum);
+          }
+        }
+        
+        if (params.projectId && projectIdInput) {
+          const projectIdNum = parseInt(params.projectId, 10);
+          if (!isNaN(projectIdNum) && projectIdNum > 0) {
+            // 입력 필드가 비어 있거나 기본값(1)일 때만 설정
+            if (!projectIdInput.value || projectIdInput.value === '1') {
+              projectIdInput.value = projectIdNum;
+              console.log('[Popup] Project ID 자동 설정:', projectIdNum);
+            }
+          }
+        }
+        
+        // 파라미터를 읽었으면 URL 확인은 건너뛰기
+        return;
       }
+      
+      // 2순위: 현재 활성 탭의 URL에서 직접 읽기
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs && tabs.length > 0) {
+          const tab = tabs[0];
+          if (tab && tab.url) {
+            // URL에서 파라미터 추출하여 입력 필드에 설정
+            autoFillIdsFromUrl(tab.url);
+          }
+        }
+        
+        // 다른 창의 활성 탭도 확인 (여러 창이 열려있을 수 있음)
+        chrome.tabs.query({ active: true }, (allTabs) => {
+          if (allTabs && allTabs.length > 0) {
+            // 일반 브라우저 창의 탭만 필터링
+            const normalTabs = allTabs.filter(t => {
+              const url = t.url || '';
+              return !url.startsWith('chrome://') && 
+                     !url.startsWith('chrome-extension://') && 
+                     !url.startsWith('about:') &&
+                     !url.startsWith('edge://');
+            });
+            
+            if (normalTabs.length > 0) {
+              const tab = normalTabs[0];
+              if (tab && tab.url) {
+                autoFillIdsFromUrl(tab.url);
+              }
+            }
+          }
+        });
+      });
     });
-  });
-}
+    
+    // 탭 URL 변경 감지 (자동화 툴에서 녹화 버튼을 눌러 URL이 변경될 수 있음)
+    // 팝업이 열려있는 동안에만 작동
+    const tabUpdateListener = function onTabUpdated(tabId, changeInfo, tab) {
+      // URL이 완전히 로드되었을 때만 처리
+      if (changeInfo.status === 'complete' && tab && tab.url && tab.active) {
+        autoFillIdsFromUrl(tab.url);
+      }
+    };
+    
+    chrome.tabs.onUpdated.addListener(tabUpdateListener);
+    
+    // 팝업이 닫힐 때 리스너 제거 (메모리 누수 방지)
+    window.addEventListener('beforeunload', () => {
+      chrome.tabs.onUpdated.removeListener(tabUpdateListener);
+    });
+  }
+})();

@@ -6083,35 +6083,66 @@ function generateCode(events, manualList, framework, language) {
   }
   
   function checkAndAutoFillIds() {
-    // 현재 활성 탭의 URL 확인
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (tabs && tabs.length > 0) {
-        const tab = tabs[0];
-        if (tab && tab.url) {
-          // URL에서 파라미터 추출하여 입력 필드에 설정
-          autoFillIdsFromUrl(tab.url);
+    // 1순위: chrome.storage에서 저장된 파라미터 읽기 (Content Script가 저장한 값)
+    chrome.storage.local.get(['testArchitectParams'], (result) => {
+      if (result.testArchitectParams) {
+        const params = result.testArchitectParams;
+        console.log('[Popup] 저장된 파라미터 읽기:', params);
+        
+        // 입력 필드가 비어 있을 때만 설정
+        if (params.tcId && tcIdInput && !tcIdInput.value) {
+          const tcIdNum = parseInt(params.tcId, 10);
+          if (!isNaN(tcIdNum) && tcIdNum > 0) {
+            tcIdInput.value = tcIdNum;
+            console.log('[Popup] TC ID 자동 설정:', tcIdNum);
+          }
         }
-      }
-      
-      // 다른 창의 활성 탭도 확인 (여러 창이 열려있을 수 있음)
-      chrome.tabs.query({ active: true }, (allTabs) => {
-        if (allTabs && allTabs.length > 0) {
-          // 일반 브라우저 창의 탭만 필터링
-          const normalTabs = allTabs.filter(t => {
-            const url = t.url || '';
-            return !url.startsWith('chrome://') && 
-                   !url.startsWith('chrome-extension://') && 
-                   !url.startsWith('about:') &&
-                   !url.startsWith('edge://');
-          });
-          
-          if (normalTabs.length > 0) {
-            const tab = normalTabs[0];
-            if (tab && tab.url) {
-              autoFillIdsFromUrl(tab.url);
+        
+        if (params.projectId && projectIdInput) {
+          const projectIdNum = parseInt(params.projectId, 10);
+          if (!isNaN(projectIdNum) && projectIdNum > 0) {
+            // 입력 필드가 비어 있거나 기본값(1)일 때만 설정
+            if (!projectIdInput.value || projectIdInput.value === '1') {
+              projectIdInput.value = projectIdNum;
+              console.log('[Popup] Project ID 자동 설정:', projectIdNum);
             }
           }
         }
+        
+        // 파라미터를 읽었으면 URL 확인은 건너뛰기
+        return;
+      }
+      
+      // 2순위: 현재 활성 탭의 URL에서 직접 읽기
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs && tabs.length > 0) {
+          const tab = tabs[0];
+          if (tab && tab.url) {
+            // URL에서 파라미터 추출하여 입력 필드에 설정
+            autoFillIdsFromUrl(tab.url);
+          }
+        }
+        
+        // 다른 창의 활성 탭도 확인 (여러 창이 열려있을 수 있음)
+        chrome.tabs.query({ active: true }, (allTabs) => {
+          if (allTabs && allTabs.length > 0) {
+            // 일반 브라우저 창의 탭만 필터링
+            const normalTabs = allTabs.filter(t => {
+              const url = t.url || '';
+              return !url.startsWith('chrome://') && 
+                     !url.startsWith('chrome-extension://') && 
+                     !url.startsWith('about:') &&
+                     !url.startsWith('edge://');
+            });
+            
+            if (normalTabs.length > 0) {
+              const tab = normalTabs[0];
+              if (tab && tab.url) {
+                autoFillIdsFromUrl(tab.url);
+              }
+            }
+          }
+        });
       });
     });
     
