@@ -27,13 +27,15 @@ export function initMessageBridge() {
           sendResponse({ recording: getRecordingState() });
           return;
         }
-        case 'RECORDING_START': {
+        case 'RECORDING_START':
+        case 'START_RECORDING': {
           // 녹화를 시작하면서 기존 이벤트를 초기화.
           startRecording({ resetEvents: true });
           sendResponse({ ok: true });
           return;
         }
-        case 'RECORDING_STOP': {
+        case 'RECORDING_STOP':
+        case 'STOP_RECORDING': {
           // 녹화를 중단하고 상태를 false로 전환.
           stopRecording();
           sendResponse({ ok: true });

@@ -7,21 +7,19 @@
 <link rel="stylesheet" href="vendor/codemirror/neo.css">
 <style>
   body {
-    min-width: 600px;
-    min-height: 400px;
+    width: 1200px;
+    min-width: 1200px;
+    max-width: 1200px;
+    height: 800px;
+    min-height: 800px;
+    max-height: 800px;
     margin: 0;
-    padding: 8px;
-    overflow-x: hidden;
-    overflow-y: auto;
-    box-sizing: border-box;
-  }
-  html {
-    height: 100%;
-    overflow: visible;
+    padding: 0;
+    overflow: hidden;
   }
   #main {
-    min-height: 400px;
-    overflow-y: visible;
+    height: calc(100vh - 200px);
+    overflow-y: auto;
   }
 </style>
 </head>
@@ -39,19 +37,6 @@
           <span class="toolbar-label">테스트 URL (선택)</span>
           <input id="test-url" placeholder="https://example.com"/>
         </label>
-      </div>
-      <div class="toolbar-row">
-        <label class="toolbar-field" for="tc-id-input">
-          <span class="toolbar-label">TC ID *</span>
-          <input id="tc-id-input" type="number" placeholder="123" min="1" required/>
-        </label>
-        <label class="toolbar-field" for="project-id-input">
-          <span class="toolbar-label">Project ID</span>
-          <input id="project-id-input" type="number" placeholder="1" min="1" value="1"/>
-        </label>
-        <div class="toolbar-field">
-          <button id="send-recording-btn" class="toolbar-btn">TestArchitect로 전송</button>
-        </div>
       </div>
       <div class="toolbar-row ai-config">
         <label class="toolbar-field" for="ai-endpoint">
@@ -96,34 +81,6 @@
         <button id="stop-record" class="toolbar-btn" disabled>Stop</button>
         <button id="replay-btn" class="toolbar-btn">Replay</button>
         <button id="element-select-btn" class="toolbar-btn">요소 선택</button>
-        <div class="action-menu-wrapper">
-          <button id="action-btn" class="toolbar-btn">Action 추가 ▼</button>
-          <div id="action-menu" class="action-menu hidden">
-            <div class="action-menu-category">
-              <div class="action-menu-header">상호작용</div>
-              <button data-action-type="interaction" data-action="click">클릭</button>
-              <button data-action-type="interaction" data-action="doubleClick">더블 클릭</button>
-              <button data-action-type="interaction" data-action="rightClick">우클릭</button>
-              <button data-action-type="interaction" data-action="hover">호버</button>
-              <button data-action-type="interaction" data-action="type">입력</button>
-              <button data-action-type="interaction" data-action="clear">입력 필드 비우기</button>
-              <button data-action-type="interaction" data-action="select">드롭다운 선택</button>
-            </div>
-            <div class="action-menu-category">
-              <div class="action-menu-header">검증</div>
-              <button data-action-type="verify" data-action="verifyText">텍스트 검증</button>
-              <button data-action-type="verify" data-action="verifyElementPresent">요소 존재 검증</button>
-              <button data-action-type="verify" data-action="verifyElementNotPresent">요소 부재 검증</button>
-              <button data-action-type="verify" data-action="verifyTitle">타이틀 검증</button>
-              <button data-action-type="verify" data-action="verifyUrl">URL 검증</button>
-            </div>
-            <div class="action-menu-category">
-              <div class="action-menu-header">대기</div>
-              <button data-action-type="wait" data-action="waitForElement">요소 대기</button>
-              <button data-action-type="wait" data-action="wait">시간 대기</button>
-            </div>
-          </div>
-        </div>
         <button id="overlay-toggle-btn" class="toolbar-btn" aria-pressed="false">오버레이 표시</button>
         <button id="reset-btn" class="toolbar-btn">초기화</button>
       </div>
@@ -164,42 +121,6 @@
               <button data-action="parent">상위 노드로 이동</button>
               <button data-action="commit">선택 완료</button>
               <button data-action="finish">선택 취소</button>
-            </div>
-          </div>
-          <div id="interaction-actions" class="element-section hidden">
-            <div class="element-title">상호작용 액션</div>
-            <div class="element-action-buttons">
-              <button data-interaction="click">클릭</button>
-              <button data-interaction="doubleClick">더블 클릭</button>
-              <button data-interaction="rightClick">우클릭</button>
-              <button data-interaction="hover">호버</button>
-              <button data-interaction="type">입력</button>
-              <button data-interaction="clear">입력 필드 비우기</button>
-              <button data-interaction="select">드롭다운 선택</button>
-            </div>
-          </div>
-          <div id="verify-actions" class="element-section hidden">
-            <div class="element-title">검증 액션</div>
-            <div class="element-action-buttons">
-              <button data-verify="verifyText">텍스트 검증</button>
-              <button data-verify="verifyElementPresent">요소 존재 검증</button>
-              <button data-verify="verifyElementNotPresent">요소 부재 검증</button>
-              <button data-verify="verifyTitle">타이틀 검증</button>
-              <button data-verify="verifyUrl">URL 검증</button>
-            </div>
-          </div>
-          <div id="wait-actions" class="element-section hidden">
-            <div class="element-title">대기 액션</div>
-            <div class="element-action-buttons">
-              <button data-wait="waitForElement">요소 대기</button>
-              <button data-wait="wait">시간 대기</button>
-            </div>
-            <div id="wait-input-panel" class="element-section hidden">
-              <div class="element-title">대기 시간 (밀리초)</div>
-              <div class="element-attr-row">
-                <input id="wait-time-input" type="number" placeholder="2000" min="0" />
-                <button id="wait-time-apply">적용</button>
-              </div>
             </div>
           </div>
           <div id="element-attribute-panel" class="element-section hidden">

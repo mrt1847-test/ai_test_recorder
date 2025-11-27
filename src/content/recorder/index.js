@@ -90,11 +90,6 @@ function handleClick(event) {
   if (target.id === '__ai_test_recorder_overlay__' || (target.closest && target.closest('#__ai_test_recorder_overlay__'))) {
     return;
   }
-  // 우클릭은 별도 처리 (button === 2)
-  if (event.button === 2) {
-    recordDomEvent({ action: 'rightClick', target });
-    return;
-  }
   recordDomEvent({ action: 'click', target });
 }
 
@@ -112,13 +107,7 @@ function handleInput(event) {
     clearTimeout(existingTimer);
   }
   const timer = setTimeout(() => {
-    const currentValue = target.value || target.textContent || '';
-    // 값이 비워지면 clear 액션으로 기록
-    if (currentValue === '') {
-      recordDomEvent({ action: 'clear', target });
-    } else {
-      recordDomEvent({ action: 'input', target, value: currentValue });
-    }
+    recordDomEvent({ action: 'input', target, value: target.value || target.textContent || '' });
     inputTimers.delete(target);
   }, INPUT_DEBOUNCE_DELAY);
   inputTimers.set(target, timer);
@@ -137,132 +126,9 @@ function handleBlur(event) {
   if (existingTimer) {
     clearTimeout(existingTimer);
     inputTimers.delete(target);
-    const currentValue = target.value || target.textContent || '';
-    if (currentValue === '') {
-      recordDomEvent({ action: 'clear', target });
-    } else {
-      recordDomEvent({ action: 'input', target, value: currentValue });
-    }
+    recordDomEvent({ action: 'input', target, value: target.value || target.textContent || '' });
   }
 }
-
-/**
- * 더블 클릭 이벤트를 감지해 녹화 중일 때만 기록한다.
- */
-function handleDoubleClick(event) {
-  if (!recorderState.isRecording) return;
-  if (elementSelectionState.mode) return;
-  const target = event.target;
-  if (!target || target === document.body || target === document.documentElement) return;
-  if (target.id === '__ai_test_recorder_overlay__' || (target.closest && target.closest('#__ai_test_recorder_overlay__'))) {
-    return;
-  }
-  recordDomEvent({ action: 'doubleClick', target });
-}
-
-/**
- * 우클릭 이벤트를 감지해 녹화 중일 때만 기록한다.
- */
-function handleRightClick(event) {
-  if (!recorderState.isRecording) return;
-  if (elementSelectionState.mode) return;
-  const target = event.target;
-  if (!target || target === document.body || target === document.documentElement) return;
-  if (target.id === '__ai_test_recorder_overlay__' || (target.closest && target.closest('#__ai_test_recorder_overlay__'))) {
-    return;
-  }
-  // contextmenu 이벤트는 기본 동작을 막지 않도록 처리
-  recordDomEvent({ action: 'rightClick', target });
-}
-
-/**
- * 마우스 호버 이벤트를 감지해 녹화 중일 때만 기록한다.
- * 주의: hover는 자동 수집하지 않음 - 사용자가 Action 메뉴에서 선택했을 때만 수집
- */
-// function handleHover(event) {
-//   if (!recorderState.isRecording) return;
-//   if (elementSelectionState.mode) return;
-//   const target = event.target;
-//   if (!target || target === document.body || target === document.documentElement) return;
-//   if (target.id === '__ai_test_recorder_overlay__' || (target.closest && target.closest('#__ai_test_recorder_overlay__'))) {
-//     return;
-//   }
-//   // hover는 debounce 적용 (너무 많은 이벤트 방지)
-//   const existingTimer = inputTimers.get(target);
-//   if (existingTimer) {
-//     return; // 이미 대기 중이면 무시
-//   }
-//   const timer = setTimeout(() => {
-//     recordDomEvent({ action: 'hover', target });
-//     inputTimers.delete(target);
-//   }, 300); // 300ms debounce
-//   inputTimers.set(target, timer);
-// }
-
-/**
- * 드롭다운(select) 변경 이벤트를 감지해 녹화 중일 때만 기록한다.
- */
-function handleSelect(event) {
-  if (!recorderState.isRecording) return;
-  if (elementSelectionState.mode) return;
-  const target = event.target;
-  if (!target || target.tagName !== 'SELECT') return;
-  if (target.id === '__ai_test_recorder_overlay__' || (target.closest && target.closest('#__ai_test_recorder_overlay__'))) {
-    return;
-  }
-  
-  // 선택된 옵션의 텍스트 또는 값 가져오기
-  const selectedOption = target.options[target.selectedIndex];
-  const value = selectedOption ? (selectedOption.text || selectedOption.value || '') : '';
-  
-  recordDomEvent({ action: 'select', target, value });
-}
-
-/**
- * URL 변경 감지 (페이지 네비게이션)
- */
-let lastUrl = window.location.href;
-let lastTitle = document.title;
-
-function checkUrlChange() {
-  if (!recorderState.isRecording) return;
-  
-  const currentUrl = window.location.href;
-  const currentTitle = document.title;
-  
-  if (currentUrl !== lastUrl || currentTitle !== lastTitle) {
-    // URL 변경 감지 - value에 URL 저장
-    const eventRecord = createEventRecord({
-      action: 'goto',
-      value: currentUrl,
-      selectors: [],
-      target: null,
-      iframeContext: null,
-      clientRect: null,
-      metadata: { domEvent: 'navigation' },
-      domContext: null
-    });
-    
-    // page 정보 업데이트
-    eventRecord.page = {
-      url: currentUrl,
-      title: currentTitle
-    };
-    
-    // primarySelector에 URL 저장 (target 대신)
-    eventRecord.primarySelector = currentUrl;
-    
-    persistEvent(eventRecord);
-    broadcastRecordedEvent(eventRecord);
-    
-    lastUrl = currentUrl;
-    lastTitle = currentTitle;
-  }
-}
-
-// URL 변경 감지를 위한 MutationObserver 및 interval
-let urlCheckInterval = null;
-let urlObserver = null;
 
 export function startRecording(options = {}) {
   const { resetEvents = true } = options;
@@ -284,10 +150,6 @@ export function startRecording(options = {}) {
     chrome.storage.local.set({ recording: true });
   }
   removeHighlight();
-  
-  // URL 변경 감지 초기화
-  lastUrl = window.location.href;
-  lastTitle = document.title;
 }
 
 export function stopRecording() {
@@ -296,12 +158,6 @@ export function stopRecording() {
   chrome.storage.local.remove(['recording']);
   // 녹화를 멈출 때 하이라이트는 정리해 UI 혼선을 줄인다.
   removeHighlight();
-  
-  // URL 체크 interval 정리
-  if (urlCheckInterval) {
-    clearInterval(urlCheckInterval);
-    urlCheckInterval = null;
-  }
 }
 
 export function initRecorderListeners() {
@@ -330,74 +186,6 @@ export function initRecorderListeners() {
       console.error('[AI Test Recorder] Failed to handle blur event:', err);
     }
   }, true);
-
-  // 드롭다운 선택 이벤트 감지
-  document.addEventListener('change', (event) => {
-    try {
-      handleSelect(event);
-    } catch (err) {
-      console.error('[AI Test Recorder] Failed to handle select event:', err);
-    }
-  }, true);
-
-  // 더블 클릭 이벤트 감지
-  document.addEventListener('dblclick', (event) => {
-    try {
-      handleDoubleClick(event);
-    } catch (err) {
-      console.error('[AI Test Recorder] Failed to handle double click event:', err);
-    }
-  }, true);
-
-  // 우클릭 이벤트 감지
-  document.addEventListener('contextmenu', (event) => {
-    try {
-      handleRightClick(event);
-    } catch (err) {
-      console.error('[AI Test Recorder] Failed to handle right click event:', err);
-    }
-  }, true);
-
-  // hover 자동 수집 비활성화 - 사용자가 Action 메뉴에서 선택했을 때만 수집
-  // document.addEventListener('mouseenter', (event) => {
-  //   try {
-  //     handleHover(event);
-  //   } catch (err) {
-  //     console.error('[AI Test Recorder] Failed to handle hover event:', err);
-  //   }
-  // }, true);
-
-  // URL 변경 감지 (history API 감지)
-  window.addEventListener('popstate', () => {
-    try {
-      setTimeout(checkUrlChange, 100);
-    } catch (err) {
-      console.error('[AI Test Recorder] Failed to handle popstate:', err);
-    }
-  });
-
-  // pushState/replaceState 감지를 위한 감시
-  const originalPushState = history.pushState;
-  const originalReplaceState = history.replaceState;
-  
-  history.pushState = function(...args) {
-    originalPushState.apply(history, args);
-    setTimeout(checkUrlChange, 100);
-  };
-  
-  history.replaceState = function(...args) {
-    originalReplaceState.apply(history, args);
-    setTimeout(checkUrlChange, 100);
-  };
-
-  // 주기적으로 URL 변경 확인 (SPA 대응)
-  urlCheckInterval = setInterval(() => {
-    try {
-      checkUrlChange();
-    } catch (err) {
-      console.error('[AI Test Recorder] Failed to check URL change:', err);
-    }
-  }, 1000);
 }
 
 export function getRecordingState() {
