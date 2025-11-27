@@ -667,7 +667,122 @@ async function handleAiCodeReviewRequest(message, sendResponse) {
 }
 
 // ==================== WebSocket 연결 관리 ====================
-// Side Panel 방식으로 전환되어 WebSocket 연결은 더 이상 필요하지 않습니다.
+
+let wsConnection = null;
+let wsReconnectAttempts = 0;
+const WS_MAX_RECONNECT_ATTEMPTS = 5; // 최대 재연결 시도 횟수
+const WS_RECONNECT_DELAY = 5000; // 5초 (연결 실패 시 재시도 간격 증가)
+const WS_URL = 'ws://localhost:3000'; // Local API Server WebSocket 주소
+
+/**
+ * WebSocket 연결 초기화 및 재연결 로직
+ * 연결 실패해도 확장 프로그램은 정상 작동 (선택사항)
+ */
+function initWebSocket() {
+  // 이미 연결되어 있으면 중단
+  if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+    console.log('[Background] WebSocket 이미 연결됨');
+    return;
+  }
+  
+  // 최대 재연결 시도 횟수 초과 시 재연결 중단
+  if (wsReconnectAttempts >= WS_MAX_RECONNECT_ATTEMPTS) {
+    console.warn('[Background] WebSocket 최대 재연결 시도 횟수 도달. 연결을 중단합니다.');
+    return;
+  }
+
+  try {
+    // 첫 번째 연결 시도일 때만 로그
+    if (wsReconnectAttempts === 0) {
+      console.log('[Background] WebSocket 연결 시도:', WS_URL);
+    }
+    wsConnection = new WebSocket(WS_URL);
+
+    wsConnection.onopen = () => {
+      console.log('[Background] ✅ WebSocket 연결 성공');
+      wsReconnectAttempts = 0; // 재연결 성공 시 카운터 리셋
+      // 연결 성공 시 Extension ID 전송 (선택적)
+      sendWebSocketMessage({
+        type: 'extension_connected',
+        extensionId: chrome.runtime.id,
+        version: EXTENSION_VERSION
+      });
+    };
+
+    wsConnection.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        console.log('[Background] WebSocket 메시지 수신:', message);
+        handleWebSocketMessage(message);
+      } catch (error) {
+        console.error('[Background] WebSocket 메시지 파싱 실패:', error, 'Raw data:', event.data);
+      }
+    };
+
+    wsConnection.onerror = (error) => {
+      // 에러는 onclose에서 처리되므로 여기서는 로그하지 않음
+      // 브라우저 콘솔에 에러가 표시되지만, 이것은 정상적인 상황일 수 있음
+    };
+
+    wsConnection.onclose = (event) => {
+      wsConnection = null;
+      
+      // 연결이 거부된 경우 (서버가 없음)
+      if (event.code === 1006 || event.code === 1000) {
+        if (wsReconnectAttempts === 0) {
+          // 첫 번째 연결 실패 시에만 로그
+          console.log('[Background] WebSocket 서버에 연결할 수 없습니다. (Local API Server가 실행되지 않았을 수 있습니다)');
+          console.log('[Background] WebSocket이 없어도 다른 기능은 정상 작동합니다.');
+        }
+      }
+      
+      // 정상 종료(1000)가 아니고, 재연결 시도 횟수가 남아있을 때만 재연결
+      if (event.code !== 1000 && wsReconnectAttempts < WS_MAX_RECONNECT_ATTEMPTS) {
+        wsReconnectAttempts++;
+        const delay = WS_RECONNECT_DELAY * wsReconnectAttempts;
+        // 재연결 시도는 조용히 (로그 최소화)
+        setTimeout(() => {
+          initWebSocket();
+        }, delay);
+      } else if (wsReconnectAttempts >= WS_MAX_RECONNECT_ATTEMPTS) {
+        // 최대 시도 횟수 도달 시 한 번만 로그
+        console.log('[Background] WebSocket 재연결을 중단했습니다. Local API Server가 실행되면 자동으로 연결됩니다.');
+      }
+    };
+
+  } catch (error) {
+    // WebSocket 생성 실패는 드문 경우이므로 로그만 남김
+    wsConnection = null;
+    
+    // 최대 시도 횟수 내에서만 재연결 (조용히)
+    if (wsReconnectAttempts < WS_MAX_RECONNECT_ATTEMPTS) {
+      wsReconnectAttempts++;
+      const delay = WS_RECONNECT_DELAY * wsReconnectAttempts;
+      setTimeout(() => {
+        initWebSocket();
+      }, delay);
+    }
+  }
+}
+
+/**
+ * WebSocket을 통해 메시지 전송
+ */
+function sendWebSocketMessage(message) {
+  if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+    try {
+      wsConnection.send(JSON.stringify(message));
+      console.log('[Background] WebSocket 메시지 전송:', message);
+      return true;
+    } catch (error) {
+      console.error('[Background] WebSocket 메시지 전송 실패:', error);
+      return false;
+    }
+  } else {
+    console.warn('[Background] WebSocket이 연결되지 않아 메시지 전송 실패:', message);
+    return false;
+  }
+}
 
 /**
  * Content Script로부터 받은 녹화 패널 열기 요청 처리
@@ -718,16 +833,81 @@ async function handleOpenRecordingPanel(message, sender, sendResponse) {
   }
 }
 
-// WebSocket 메시지 처리는 더 이상 필요하지 않습니다.
-// Side Panel 방식으로 전환되어 URL 파라미터를 통한 자동 열기가 사용됩니다.
+/**
+ * WebSocket으로 받은 메시지 처리
+ */
+function handleWebSocketMessage(message) {
+  if (!message || !message.type) {
+    console.warn('[Background] 잘못된 WebSocket 메시지:', message);
+    return;
+  }
+
+  switch (message.type) {
+    case 'OPEN_POPUP':
+      // 팝업 열기
+      chrome.windows.create({
+        url: chrome.runtime.getURL('popup.html'),
+        type: 'popup',
+        width: 1220,
+        height: 850,
+        focused: true
+      }, (window) => {
+        if (chrome.runtime.lastError) {
+          console.error('[Background] 창 열기 실패:', chrome.runtime.lastError);
+          sendWebSocketMessage({
+            type: 'OPEN_POPUP_RESPONSE',
+            success: false,
+            error: chrome.runtime.lastError.message
+          });
+        } else {
+          console.log('[Background] 새 창이 열렸습니다. Window ID:', window.id);
+          sendWebSocketMessage({
+            type: 'OPEN_POPUP_RESPONSE',
+            success: true,
+            windowId: window.id
+          });
+        }
+      });
+      break;
+
+    case 'START_RECORDING':
+      // 녹화 시작 (필요한 경우)
+      // 현재는 popup에서 처리하므로 여기서는 알림만
+      sendWebSocketMessage({
+        type: 'START_RECORDING_RESPONSE',
+        message: '녹화는 팝업에서 시작해주세요'
+      });
+      break;
+
+    case 'PING':
+      // 연결 확인
+      sendWebSocketMessage({
+        type: 'PONG',
+        timestamp: Date.now()
+      });
+      break;
+
+    default:
+      console.warn('[Background] 알 수 없는 WebSocket 메시지 타입:', message.type);
+      sendWebSocketMessage({
+        type: 'ERROR',
+        message: `Unknown message type: ${message.type}`
+      });
+  }
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[Background] AI Test Recorder 설치됨');
+  initWebSocket();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  console.log('[Background] AI Test Recorder 시작됨');
+  console.log('[Background] Chrome 시작 시 WebSocket 연결');
+  initWebSocket();
 });
+
+// Background Script가 활성화될 때 WebSocket 연결
+initWebSocket();
 
 // 확장 프로그램 아이콘 클릭 시 새 창 열기
 chrome.action.onClicked.addListener(() => {
