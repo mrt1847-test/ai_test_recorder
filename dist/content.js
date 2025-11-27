@@ -2642,10 +2642,6 @@
     if (target.id === "__ai_test_recorder_overlay__" || target.closest && target.closest("#__ai_test_recorder_overlay__")) {
       return;
     }
-    if (event.button === 2) {
-      recordDomEvent({ action: "rightClick", target });
-      return;
-    }
     recordDomEvent({ action: "click", target });
   }
   function handleInput(event) {
@@ -2659,12 +2655,7 @@
       clearTimeout(existingTimer);
     }
     const timer = setTimeout(() => {
-      const currentValue = target.value || target.textContent || "";
-      if (currentValue === "") {
-        recordDomEvent({ action: "clear", target });
-      } else {
-        recordDomEvent({ action: "input", target, value: currentValue });
-      }
+      recordDomEvent({ action: "input", target, value: target.value || target.textContent || "" });
       inputTimers.delete(target);
     }, INPUT_DEBOUNCE_DELAY);
     inputTimers.set(target, timer);
@@ -2679,75 +2670,9 @@
     if (existingTimer) {
       clearTimeout(existingTimer);
       inputTimers.delete(target);
-      const currentValue = target.value || target.textContent || "";
-      if (currentValue === "") {
-        recordDomEvent({ action: "clear", target });
-      } else {
-        recordDomEvent({ action: "input", target, value: currentValue });
-      }
+      recordDomEvent({ action: "input", target, value: target.value || target.textContent || "" });
     }
   }
-  function handleDoubleClick(event) {
-    if (!recorderState.isRecording) return;
-    if (elementSelectionState.mode) return;
-    const target = event.target;
-    if (!target || target === document.body || target === document.documentElement) return;
-    if (target.id === "__ai_test_recorder_overlay__" || target.closest && target.closest("#__ai_test_recorder_overlay__")) {
-      return;
-    }
-    recordDomEvent({ action: "doubleClick", target });
-  }
-  function handleRightClick(event) {
-    if (!recorderState.isRecording) return;
-    if (elementSelectionState.mode) return;
-    const target = event.target;
-    if (!target || target === document.body || target === document.documentElement) return;
-    if (target.id === "__ai_test_recorder_overlay__" || target.closest && target.closest("#__ai_test_recorder_overlay__")) {
-      return;
-    }
-    recordDomEvent({ action: "rightClick", target });
-  }
-  function handleSelect(event) {
-    if (!recorderState.isRecording) return;
-    if (elementSelectionState.mode) return;
-    const target = event.target;
-    if (!target || target.tagName !== "SELECT") return;
-    if (target.id === "__ai_test_recorder_overlay__" || target.closest && target.closest("#__ai_test_recorder_overlay__")) {
-      return;
-    }
-    const selectedOption = target.options[target.selectedIndex];
-    const value = selectedOption ? selectedOption.text || selectedOption.value || "" : "";
-    recordDomEvent({ action: "select", target, value });
-  }
-  var lastUrl = window.location.href;
-  var lastTitle = document.title;
-  function checkUrlChange() {
-    if (!recorderState.isRecording) return;
-    const currentUrl = window.location.href;
-    const currentTitle = document.title;
-    if (currentUrl !== lastUrl || currentTitle !== lastTitle) {
-      const eventRecord = createEventRecord({
-        action: "goto",
-        value: currentUrl,
-        selectors: [],
-        target: null,
-        iframeContext: null,
-        clientRect: null,
-        metadata: { domEvent: "navigation" },
-        domContext: null
-      });
-      eventRecord.page = {
-        url: currentUrl,
-        title: currentTitle
-      };
-      eventRecord.primarySelector = currentUrl;
-      persistEvent(eventRecord);
-      broadcastRecordedEvent(eventRecord);
-      lastUrl = currentUrl;
-      lastTitle = currentTitle;
-    }
-  }
-  var urlCheckInterval = null;
   function startRecording(options = {}) {
     const { resetEvents = true } = options;
     if (recorderState.isRecording) {
@@ -2767,18 +2692,12 @@
       chrome.storage.local.set({ recording: true });
     }
     removeHighlight();
-    lastUrl = window.location.href;
-    lastTitle = document.title;
   }
   function stopRecording() {
     recorderState.isRecording = false;
     ensureRecordingState(false);
     chrome.storage.local.remove(["recording"]);
     removeHighlight();
-    if (urlCheckInterval) {
-      clearInterval(urlCheckInterval);
-      urlCheckInterval = null;
-    }
   }
   function initRecorderListeners() {
     document.addEventListener("click", (event) => {
@@ -2802,51 +2721,6 @@
         console.error("[AI Test Recorder] Failed to handle blur event:", err);
       }
     }, true);
-    document.addEventListener("change", (event) => {
-      try {
-        handleSelect(event);
-      } catch (err) {
-        console.error("[AI Test Recorder] Failed to handle select event:", err);
-      }
-    }, true);
-    document.addEventListener("dblclick", (event) => {
-      try {
-        handleDoubleClick(event);
-      } catch (err) {
-        console.error("[AI Test Recorder] Failed to handle double click event:", err);
-      }
-    }, true);
-    document.addEventListener("contextmenu", (event) => {
-      try {
-        handleRightClick(event);
-      } catch (err) {
-        console.error("[AI Test Recorder] Failed to handle right click event:", err);
-      }
-    }, true);
-    window.addEventListener("popstate", () => {
-      try {
-        setTimeout(checkUrlChange, 100);
-      } catch (err) {
-        console.error("[AI Test Recorder] Failed to handle popstate:", err);
-      }
-    });
-    const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
-    history.pushState = function(...args) {
-      originalPushState.apply(history, args);
-      setTimeout(checkUrlChange, 100);
-    };
-    history.replaceState = function(...args) {
-      originalReplaceState.apply(history, args);
-      setTimeout(checkUrlChange, 100);
-    };
-    urlCheckInterval = setInterval(() => {
-      try {
-        checkUrlChange();
-      } catch (err) {
-        console.error("[AI Test Recorder] Failed to check URL change:", err);
-      }
-    }, 1e3);
   }
   function getRecordingState() {
     return recorderState.isRecording;
@@ -2865,12 +2739,14 @@
             sendResponse({ recording: getRecordingState() });
             return;
           }
-          case "RECORDING_START": {
+          case "RECORDING_START":
+          case "START_RECORDING": {
             startRecording({ resetEvents: true });
             sendResponse({ ok: true });
             return;
           }
-          case "RECORDING_STOP": {
+          case "RECORDING_STOP":
+          case "STOP_RECORDING": {
             stopRecording();
             sendResponse({ ok: true });
             return;
@@ -2989,6 +2865,21 @@
         });
         window.testArchitectParams = params;
         console.log("[Content Script] URL \uD30C\uB77C\uBBF8\uD130 \uC800\uC7A5:", params);
+        if (tcId && projectId && sessionId) {
+          console.log("[Content Script] Side Panel \uC5F4\uAE30 \uC694\uCCAD:", params);
+          chrome.runtime.sendMessage({
+            type: "OPEN_RECORDING_PANEL",
+            tcId,
+            projectId,
+            sessionId
+          }, (response) => {
+            if (chrome.runtime.lastError) {
+              console.error("[Content Script] Side Panel \uC5F4\uAE30 \uBA54\uC2DC\uC9C0 \uC804\uC1A1 \uC2E4\uD328:", chrome.runtime.lastError);
+            } else {
+              console.log("[Content Script] Side Panel \uC5F4\uAE30 \uC751\uB2F5:", response);
+            }
+          });
+        }
       }
       if (window.testArchitectParams && typeof window.testArchitectParams === "object") {
         const params = window.testArchitectParams;
@@ -3040,15 +2931,15 @@
     if (window[GLOBAL_FLAG]) return;
     window[GLOBAL_FLAG] = true;
     extractAndSaveUrlParams();
-    let lastUrl2 = window.location.href;
-    const urlCheckInterval2 = setInterval(() => {
-      if (window.location.href !== lastUrl2) {
-        lastUrl2 = window.location.href;
+    let lastUrl = window.location.href;
+    const urlCheckInterval = setInterval(() => {
+      if (window.location.href !== lastUrl) {
+        lastUrl = window.location.href;
         extractAndSaveUrlParams();
       }
     }, 500);
     window.addEventListener("beforeunload", () => {
-      clearInterval(urlCheckInterval2);
+      clearInterval(urlCheckInterval);
     });
     initOverlaySystem();
     initRecorderListeners();

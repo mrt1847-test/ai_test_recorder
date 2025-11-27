@@ -23,13 +23,20 @@ function copyStaticAssets() {
     'panel.js',
     'popup.html',
     'popup.js',
+    'sidepanel.html',
+    'sidepanel.js',
     'style.css'
   ];
 
   files.forEach((file) => {
     const src = resolve(projectRoot, file);
     const dest = resolve(distDir, file);
-    copyFileSync(src, dest);
+    if (existsSync(src)) {
+      copyFileSync(src, dest);
+      console.log(`Copied: ${file}`);
+    } else {
+      console.warn(`Warning: File not found: ${file}`);
+    }
   });
 
   const iconsSrc = resolve(projectRoot, 'icons');
