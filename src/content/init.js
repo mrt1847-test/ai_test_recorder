@@ -41,23 +41,6 @@ function extractAndSaveUrlParams() {
       window.testArchitectParams = params;
       
       console.log('[Content Script] URL 파라미터 저장:', params);
-      
-      // 필수 파라미터가 모두 있으면 Side Panel 열기 요청
-      if (tcId && projectId && sessionId) {
-        console.log('[Content Script] Side Panel 열기 요청:', params);
-        chrome.runtime.sendMessage({
-          type: 'OPEN_RECORDING_PANEL',
-          tcId: tcId,
-          projectId: projectId,
-          sessionId: sessionId
-        }, (response) => {
-          if (chrome.runtime.lastError) {
-            console.error('[Content Script] Side Panel 열기 메시지 전송 실패:', chrome.runtime.lastError);
-          } else {
-            console.log('[Content Script] Side Panel 열기 응답:', response);
-          }
-        });
-      }
     }
     
     // 전역 변수 확인 (자동화 툴에서 설정한 경우)

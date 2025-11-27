@@ -785,55 +785,6 @@ function sendWebSocketMessage(message) {
 }
 
 /**
- * Content Script로부터 받은 녹화 패널 열기 요청 처리
- */
-async function handleOpenRecordingPanel(message, sender, sendResponse) {
-  try {
-    const { tcId, projectId, sessionId } = message;
-    
-    if (!tcId || !projectId || !sessionId) {
-      throw new Error('필수 파라미터(tcId, projectId, sessionId)가 없습니다');
-    }
-    
-    // 현재 활성 탭 찾기
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    
-    if (!tabs || tabs.length === 0) {
-      throw new Error('활성 탭을 찾을 수 없습니다');
-    }
-    
-    const tab = tabs[0];
-    
-    // 녹화 데이터를 Storage에 저장 (Side Panel에서 사용)
-    await chrome.storage.local.set({
-      recordingData: {
-        tcId,
-        projectId,
-        sessionId,
-        timestamp: Date.now()
-      }
-    });
-    
-    // Side Panel 열기
-    await chrome.sidePanel.open({ windowId: tab.windowId });
-    
-    console.log('[Background] Side Panel 열기 성공');
-    
-    sendResponse({ 
-      success: true, 
-      message: 'Side Panel이 열렸습니다' 
-    });
-    
-  } catch (error) {
-    console.error('[Background] Side Panel 열기 실패:', error);
-    sendResponse({ 
-      success: false, 
-      error: error.message 
-    });
-  }
-}
-
-/**
  * WebSocket으로 받은 메시지 처리
  */
 function handleWebSocketMessage(message) {
@@ -951,11 +902,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg && msg.type === 'OPEN_RECORDING_PANEL') {
-    handleOpenRecordingPanel(msg, sender, sendResponse);
-    return true; // 비동기 응답을 위해 true 반환
-  }
-
   if (msg && msg.type === 'GET_EVENTS') {
     // 저장된 이벤트 목록을 그대로 반환.
     chrome.storage.local.get({ events: [] }, (res) => sendResponse({ events: res.events || [] }));
