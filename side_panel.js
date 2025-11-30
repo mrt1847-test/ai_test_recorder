@@ -29,6 +29,8 @@ const waitTimeApplyBtn = document.getElementById('wait-time-apply');
 const interactionActionsContainer = document.getElementById('interaction-actions');
 const actionBtn = document.getElementById('action-btn');
 const actionMenu = document.getElementById('action-menu');
+const globalAddAssertionBtn = document.getElementById('global-add-assertion-btn');
+const globalAssertionMenu = document.getElementById('global-assertion-menu');
 const aiEndpointInput = document.getElementById('ai-endpoint');
 const aiApiKeyInput = document.getElementById('ai-api-key');
 const aiModelInput = document.getElementById('ai-model');
@@ -180,6 +182,7 @@ const selectionState = {
   stage: 'idle', // idle | await-root | await-candidate | await-action | await-child
   stack: [],
   pendingAction: null,
+  pendingStepIndex: null, // assertion을 추가할 스텝 인덱스
   pendingAttribute: '',
   codePreview: ''
 };
@@ -1231,7 +1234,64 @@ if (deleteEventBtn) {
 
 listenEvents();
 updateCode();
-  loadTimeline();
+loadTimeline();
+updateStepsEmptyState();
+
+// 설정 패널 토글
+const settingsToggleBtn = document.getElementById('settings-toggle-btn');
+const settingsPanel = document.getElementById('settings-panel');
+if (settingsToggleBtn && settingsPanel) {
+  settingsToggleBtn.addEventListener('click', () => {
+    settingsPanel.classList.toggle('hidden');
+  });
+}
+
+// 단계 상세 정보 닫기
+const stepDetailsClose = document.getElementById('step-details-close');
+const stepDetailsPanel = document.getElementById('step-details-panel');
+if (stepDetailsClose && stepDetailsPanel) {
+  stepDetailsClose.addEventListener('click', () => {
+    stepDetailsPanel.classList.add('hidden');
+    // 선택 해제
+    document.querySelectorAll('.recorder-step').forEach(item => item.classList.remove('selected'));
+    currentEventIndex = -1;
+    updateDeleteButtonState();
+  });
+}
+
+// 코드 미리보기 접기/펼치기
+const codeAreaToggle = document.getElementById('code-area-toggle');
+const codeAreaContent = document.getElementById('code-area-content');
+if (codeAreaToggle && codeAreaContent) {
+  codeAreaToggle.addEventListener('click', () => {
+    codeAreaContent.classList.toggle('collapsed');
+    codeAreaToggle.classList.toggle('collapsed');
+    codeAreaToggle.textContent = codeAreaContent.classList.contains('collapsed') ? '▶' : '▼';
+  });
+}
+
+// Replay Log 접기/펼치기
+const replayLogToggle = document.getElementById('replay-log-toggle');
+const replayLogContent = document.getElementById('replay-log-content');
+if (replayLogToggle && replayLogContent) {
+  replayLogToggle.addEventListener('click', () => {
+    replayLogContent.classList.toggle('collapsed');
+    replayLogToggle.classList.toggle('collapsed');
+    replayLogToggle.textContent = replayLogContent.classList.contains('collapsed') ? '▶' : '▼';
+  });
+}
+
+// 빈 상태 메시지 표시
+function updateStepsEmptyState() {
+  const stepsEmpty = document.getElementById('steps-empty');
+  if (stepsEmpty) {
+    if (allEvents.length === 0) {
+      stepsEmpty.classList.remove('hidden');
+    } else {
+      stepsEmpty.classList.add('hidden');
+    }
+  }
+}
 
 if (elementSelectBtn) {
   elementSelectBtn.addEventListener('click', () => {
@@ -1249,6 +1309,37 @@ if (actionBtn && actionMenu) {
     e.stopPropagation();
     actionMenu.classList.toggle('hidden');
   });
+  
+  // Global assertion 버튼 이벤트 핸들러
+  if (globalAddAssertionBtn && globalAssertionMenu) {
+    globalAddAssertionBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      globalAssertionMenu.classList.toggle('hidden');
+      // 다른 메뉴 닫기
+      if (actionMenu) actionMenu.classList.add('hidden');
+    });
+    
+    // Global assertion 메뉴 외부 클릭 시 닫기
+    document.addEventListener('click', (e) => {
+      if (globalAddAssertionBtn && globalAssertionMenu && 
+          !globalAddAssertionBtn.contains(e.target) && 
+          !globalAssertionMenu.contains(e.target)) {
+        globalAssertionMenu.classList.add('hidden');
+      }
+    });
+    
+    // Global assertion 타입 선택 처리
+    globalAssertionMenu.addEventListener('click', (e) => {
+      const button = e.target.closest('button[data-assertion]');
+      if (!button) return;
+      
+      const assertionType = button.getAttribute('data-assertion');
+      globalAssertionMenu.classList.add('hidden');
+      
+      // 독립적인 assertion 추가 (맨 끝에 추가)
+      handleGlobalAssertion(assertionType);
+    });
+  }
   
   // 메뉴 외부 클릭 시 닫기
   document.addEventListener('click', (e) => {
@@ -2056,6 +2147,9 @@ function syncTimelineFromEvents(events, options = {}) {
     ? events.map((ev) => normalizeEventRecord(ev))
     : [];
 
+  // 빈 상태 메시지 업데이트
+  updateStepsEmptyState();
+
   const nextAiState = new Map();
   normalizedEvents.forEach((event) => {
     const key = getAiStateKey(event);
@@ -2085,8 +2179,10 @@ function syncTimelineFromEvents(events, options = {}) {
     normalizedEvents.forEach((event, index) => {
       appendTimelineItem(event, index);
     });
-    const items = timeline.querySelectorAll('.timeline-item');
+    const items = timeline.querySelectorAll('.recorder-step');
     items.forEach((item) => item.classList.remove('selected'));
+    // 빈 상태 메시지 업데이트
+    updateStepsEmptyState();
   }
 
   let indexToSelect = -1;
@@ -2149,7 +2245,7 @@ function listenEvents() {
       appendTimelineItem(normalizedEvent, index);
       // 자동으로 마지막 이벤트 선택
       currentEventIndex = index;
-      document.querySelectorAll('.timeline-item').forEach(item => item.classList.remove('selected'));
+      document.querySelectorAll('.recorder-step').forEach(item => item.classList.remove('selected'));
       const lastItem = document.querySelector(`[data-event-index="${index}"]`);
       if (lastItem) {
         lastItem.classList.add('selected');
@@ -2234,49 +2330,642 @@ function listenEvents() {
   runtimeListenerRegistered = true;
 }
 
+// 액션 타입별 아이콘 매핑
+function getActionIcon(action) {
+  const iconMap = {
+    'click': '👆',
+    'doubleClick': '👆👆',
+    'rightClick': '🖱',
+    'hover': '👋',
+    'type': '⌨',
+    'input': '⌨',
+    'clear': '🗑',
+    'select': '📋',
+    'navigate': '🌐',
+    'goto': '🌐',
+    'open': '🌐',
+    'wait': '⏱',
+    'waitForElement': '⏳',
+    'verifyText': '✓',
+    'verifyElementPresent': '✓',
+    'verifyElementNotPresent': '✗',
+    'verifyTitle': '📄',
+    'verifyUrl': '🔗'
+  };
+  return iconMap[action] || '•';
+}
+
+// 액션 라벨 포맷팅
+function formatActionLabel(action) {
+  const labelMap = {
+    'click': 'Click',
+    'doubleClick': 'Double click',
+    'rightClick': 'Right click',
+    'hover': 'Hover',
+    'type': 'Type',
+    'input': 'Type',
+    'clear': 'Clear',
+    'select': 'Select',
+    'navigate': 'Navigate',
+    'goto': 'Navigate',
+    'open': 'Navigate',
+    'wait': 'Wait',
+    'waitForElement': 'Wait for element',
+    'verifyText': 'Verify text',
+    'verifyElementPresent': 'Verify element present',
+    'verifyElementNotPresent': 'Verify element not present',
+    'verifyTitle': 'Verify title',
+    'verifyUrl': 'Verify URL'
+  };
+  return labelMap[action] || action;
+}
+
+// 타겟 정보 포맷팅
+function formatTargetInfo(ev) {
+  if (ev.target) {
+    if (ev.target.id) return `#${ev.target.id}`;
+    if (ev.target.className) return `.${ev.target.className.split(' ')[0]}`;
+    if (ev.target.tagName) return ev.target.tagName.toLowerCase();
+  }
+  return '';
+}
+
 function appendTimelineItem(ev, index) {
   const div = document.createElement('div');
-  div.className = 'timeline-item';
+  div.className = 'recorder-step';
   div.dataset.eventIndex = index;
-  const timestamp = ev.timestamp ? new Date(ev.timestamp) : null;
-  const timeLabel = timestamp
-    ? `${String(timestamp.getHours()).padStart(2, '0')}:${String(timestamp.getMinutes()).padStart(2, '0')}:${String(timestamp.getSeconds()).padStart(2, '0')}`
-    : '--:--:--';
-  const actionLabel = ev.action || 'event';
+  
+  const action = ev.action || 'event';
+  const actionIcon = getActionIcon(action);
+  const actionLabel = formatActionLabel(action);
   const usedSelector = resolveTimelineSelector(ev);
-  const row = document.createElement('div');
-  row.className = 'timeline-row';
-  const timeSpan = document.createElement('span');
-  timeSpan.className = 'time';
-  timeSpan.textContent = timeLabel;
-  const eventSpan = document.createElement('span');
-  eventSpan.className = 'event';
-  eventSpan.textContent = actionLabel;
-  row.appendChild(timeSpan);
-  row.appendChild(eventSpan);
-
-  const selectorLine = document.createElement('div');
-  selectorLine.className = 'selector-line';
-  const selectorValue = document.createElement('span');
-  selectorValue.className = 'value';
-  selectorValue.textContent = usedSelector || '';
-  selectorLine.appendChild(selectorValue);
-
-  div.appendChild(row);
-  div.appendChild(selectorLine);
-  div.style.cursor = 'pointer';
-  div.addEventListener('click', () => {
+  const targetInfo = formatTargetInfo(ev);
+  
+  // 단계 번호
+  const stepNumber = document.createElement('div');
+  stepNumber.className = 'recorder-step-number';
+  stepNumber.textContent = index + 1;
+  
+  // 아이콘
+  const stepIcon = document.createElement('div');
+  stepIcon.className = 'recorder-step-icon';
+  stepIcon.textContent = actionIcon;
+  
+  // 콘텐츠 영역
+  const stepContent = document.createElement('div');
+  stepContent.className = 'recorder-step-content';
+  
+  // 액션 라인
+  const actionLine = document.createElement('div');
+  actionLine.className = 'recorder-step-action';
+  actionLine.textContent = actionLabel;
+  
+  // 타겟 정보
+  if (targetInfo || usedSelector) {
+    const targetLine = document.createElement('div');
+    targetLine.className = 'recorder-step-target';
+    targetLine.textContent = targetInfo || usedSelector || '';
+    stepContent.appendChild(actionLine);
+    stepContent.appendChild(targetLine);
+  } else {
+    stepContent.appendChild(actionLine);
+  }
+  
+  // 셀렉터 정보 (있는 경우)
+  if (usedSelector && usedSelector !== targetInfo) {
+    const selectorLine = document.createElement('div');
+    selectorLine.className = 'recorder-step-selector';
+    selectorLine.textContent = usedSelector;
+    stepContent.appendChild(selectorLine);
+  }
+  
+  // 액션 버튼들
+  const stepActions = document.createElement('div');
+  stepActions.className = 'recorder-step-actions';
+  
+  const editBtn = document.createElement('button');
+  editBtn.className = 'recorder-step-btn';
+  editBtn.textContent = '✏';
+  editBtn.title = '편집';
+  editBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // 편집 기능 (추후 구현)
+    console.log('Edit step', index);
+  });
+  
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'recorder-step-btn';
+  deleteBtn.textContent = '🗑';
+  deleteBtn.title = '삭제';
+  deleteBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (confirm('이 단계를 삭제하시겠습니까?')) {
+      // storage에도 저장하는 방식으로 삭제
+      const updatedEvents = allEvents.slice();
+      updatedEvents.splice(index, 1);
+      
+      chrome.storage.local.set({ events: updatedEvents }, () => {
+        if (chrome.runtime.lastError) {
+          console.error('[AI Test Recorder] Failed to delete event:', chrome.runtime.lastError);
+          alert('이벤트를 삭제할 수 없습니다. 다시 시도해주세요.');
+          return;
+        }
+        
+        // 타임라인 업데이트
+        const nextIndex = updatedEvents.length > 0 ? Math.min(index, updatedEvents.length - 1) : -1;
+        currentEventIndex = nextIndex;
+        const normalized = syncTimelineFromEvents(updatedEvents, {
+          preserveSelection: nextIndex !== -1,
+          selectLast: false,
+          resetAiState: false
+        });
+        updateDeleteButtonState();
+        updateCode({ preloadedEvents: normalized });
+        
+        // 단계 상세 정보 패널 닫기 (삭제된 경우)
+        if (nextIndex === -1) {
+          const stepDetailsPanel = document.getElementById('step-details-panel');
+          if (stepDetailsPanel) {
+            stepDetailsPanel.classList.add('hidden');
+          }
+        }
+      });
+    }
+  });
+  
+  // 더보기 버튼 (펼치기/접기)
+  const expandBtn = document.createElement('button');
+  expandBtn.className = 'recorder-step-expand';
+  expandBtn.innerHTML = '▼';
+  expandBtn.title = '상세 정보 펼치기/접기';
+  expandBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    div.classList.toggle('expanded');
+    expandBtn.innerHTML = div.classList.contains('expanded') ? '▲' : '▼';
+  });
+  
+  stepActions.appendChild(expandBtn);
+  stepActions.appendChild(editBtn);
+  stepActions.appendChild(deleteBtn);
+  
+  // 상세 정보 영역 (기본적으로 숨김)
+  const stepDetails = document.createElement('div');
+  stepDetails.className = 'recorder-step-details';
+  
+  // Type 정보
+  const typeRow = document.createElement('div');
+  typeRow.className = 'step-detail-row';
+  const typeLabel = document.createElement('span');
+  typeLabel.className = 'step-detail-label';
+  typeLabel.textContent = 'type:';
+  const typeValue = document.createElement('span');
+  typeValue.className = 'step-detail-value';
+  typeValue.textContent = action;
+  typeRow.appendChild(typeLabel);
+  typeRow.appendChild(typeValue);
+  stepDetails.appendChild(typeRow);
+  
+  // Frame 정보
+  if (ev.frame || ev.iframeContext) {
+    const frameRow = document.createElement('div');
+    frameRow.className = 'step-detail-row';
+    const frameLabel = document.createElement('span');
+    frameLabel.className = 'step-detail-label';
+    frameLabel.textContent = 'frame:';
+    const frameValue = document.createElement('span');
+    frameValue.className = 'step-detail-value';
+    frameValue.textContent = ev.frame ? JSON.stringify(ev.frame) : (ev.iframeContext ? '0' : '');
+    frameRow.appendChild(frameLabel);
+    frameRow.appendChild(frameValue);
+    stepDetails.appendChild(frameRow);
+  }
+  
+  // Selectors 정보
+  if (usedSelector || (ev.selectorCandidates && ev.selectorCandidates.length > 0)) {
+    const selectorsRow = document.createElement('div');
+    selectorsRow.className = 'step-detail-row';
+    const selectorsLabel = document.createElement('span');
+    selectorsLabel.className = 'step-detail-label';
+    selectorsLabel.textContent = 'selectors:';
+    selectorsRow.appendChild(selectorsLabel);
+    
+    const selectorsContainer = document.createElement('div');
+    selectorsContainer.className = 'step-detail-selectors';
+    
+    // Primary selector
+    if (usedSelector) {
+      const selectorItem = document.createElement('div');
+      selectorItem.className = 'step-detail-selector-item';
+      const selectorLabel = document.createElement('span');
+      selectorLabel.className = 'step-detail-selector-label';
+      selectorLabel.textContent = 'selector #1:';
+      const selectorValue = document.createElement('span');
+      selectorValue.className = 'step-detail-selector-value';
+      selectorValue.textContent = usedSelector;
+      selectorItem.appendChild(selectorLabel);
+      selectorItem.appendChild(selectorValue);
+      selectorsContainer.appendChild(selectorItem);
+    }
+    
+    // Additional selectors from candidates
+    if (ev.selectorCandidates && ev.selectorCandidates.length > 0) {
+      let selectorIndex = 2;
+      ev.selectorCandidates.slice(0, 3).forEach((candidate) => {
+        if (candidate.selector && candidate.selector !== usedSelector) {
+          const selectorItem = document.createElement('div');
+          selectorItem.className = 'step-detail-selector-item';
+          const selectorLabel = document.createElement('span');
+          selectorLabel.className = 'step-detail-selector-label';
+          selectorLabel.textContent = `selector #${selectorIndex}:`;
+          const selectorValue = document.createElement('span');
+          selectorValue.className = 'step-detail-selector-value';
+          selectorValue.textContent = candidate.selector;
+          selectorItem.appendChild(selectorLabel);
+          selectorItem.appendChild(selectorValue);
+          selectorsContainer.appendChild(selectorItem);
+          selectorIndex++;
+        }
+      });
+    }
+    
+    selectorsRow.appendChild(selectorsContainer);
+    stepDetails.appendChild(selectorsRow);
+  }
+  
+  // Value 정보 (type 액션인 경우)
+  if (ev.action === 'type' && ev.value) {
+    const valueRow = document.createElement('div');
+    valueRow.className = 'step-detail-row';
+    const valueLabel = document.createElement('span');
+    valueLabel.className = 'step-detail-label';
+    valueLabel.textContent = 'value:';
+    const valueValue = document.createElement('span');
+    valueValue.className = 'step-detail-value';
+    valueValue.textContent = ev.value;
+    valueRow.appendChild(valueLabel);
+    valueRow.appendChild(valueValue);
+    stepDetails.appendChild(valueRow);
+  }
+  
+  // URL 정보 (navigate/goto 액션인 경우)
+  if ((ev.action === 'navigate' || ev.action === 'goto' || ev.action === 'open') && (ev.url || ev.value || ev.primarySelector)) {
+    const urlRow = document.createElement('div');
+    urlRow.className = 'step-detail-row';
+    const urlLabel = document.createElement('span');
+    urlLabel.className = 'step-detail-label';
+    urlLabel.textContent = 'url:';
+    const urlValue = document.createElement('span');
+    urlValue.className = 'step-detail-value';
+    urlValue.textContent = ev.url || ev.value || ev.primarySelector || '';
+    urlRow.appendChild(urlLabel);
+    urlRow.appendChild(urlValue);
+    stepDetails.appendChild(urlRow);
+  }
+  
+  // 스텝에 귀속된 Assertion 추가 섹션
+  const assertionSection = document.createElement('div');
+  assertionSection.className = 'step-assertion-section';
+  
+  const addAssertionBtn = document.createElement('button');
+  addAssertionBtn.className = 'step-add-assertion-btn';
+  addAssertionBtn.textContent = 'Add assertion';
+  addAssertionBtn.type = 'button';
+  
+  const assertionMenu = document.createElement('div');
+  assertionMenu.className = 'step-assertion-menu hidden';
+  
+  const menuHeader = document.createElement('div');
+  menuHeader.className = 'assertion-menu-header';
+  menuHeader.textContent = 'Assertion 타입 선택';
+  assertionMenu.appendChild(menuHeader);
+  
+  const menuButtons = document.createElement('div');
+  menuButtons.className = 'assertion-menu-buttons';
+  
+  const assertionTypes = [
+    { type: 'verifyText', label: '텍스트 검증' },
+    { type: 'verifyElementPresent', label: '요소 존재 검증' },
+    { type: 'verifyElementNotPresent', label: '요소 부재 검증' },
+    { type: 'verifyTitle', label: '타이틀 검증' },
+    { type: 'verifyUrl', label: 'URL 검증' }
+  ];
+  
+  assertionTypes.forEach(({ type, label }) => {
+    const btn = document.createElement('button');
+    btn.className = 'assertion-menu-btn';
+    btn.textContent = label;
+    btn.setAttribute('data-assertion', type);
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      assertionMenu.classList.add('hidden');
+      handleStepAssertion(index, type, ev);
+    });
+    menuButtons.appendChild(btn);
+  });
+  
+  assertionMenu.appendChild(menuButtons);
+  
+  addAssertionBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    assertionMenu.classList.toggle('hidden');
+  });
+  
+  assertionSection.appendChild(addAssertionBtn);
+  assertionSection.appendChild(assertionMenu);
+  stepDetails.appendChild(assertionSection);
+  
+  // 메인 영역 (번호, 아이콘, 콘텐츠, 액션 버튼)
+  const stepMain = document.createElement('div');
+  stepMain.className = 'recorder-step-main';
+  stepMain.appendChild(stepNumber);
+  stepMain.appendChild(stepIcon);
+  stepMain.appendChild(stepContent);
+  stepMain.appendChild(stepActions);
+  
+  // 조립
+  div.appendChild(stepMain);
+  div.appendChild(stepDetails);
+  
+  // 클릭 이벤트 (선택만, 펼치기는 expandBtn에서 처리)
+  div.addEventListener('click', (e) => {
+    // expandBtn이나 stepActions를 클릭한 경우는 제외
+    if (e.target.closest('.recorder-step-expand') || e.target.closest('.recorder-step-actions')) {
+      return;
+    }
+    
     // 이전 선택 해제
-    document.querySelectorAll('.timeline-item').forEach(item => item.classList.remove('selected'));
+    document.querySelectorAll('.recorder-step').forEach(item => item.classList.remove('selected'));
     // 현재 선택
     div.classList.add('selected');
     currentEventIndex = index;
-      // 해당 이벤트의 셀렉터 표시
-      showSelectors(ev.selectorCandidates || [], ev, index);
-      showIframe(ev.iframeContext);
-      updateDeleteButtonState();
+    
+    // 단계 상세 정보 패널도 표시 (기존 방식 유지)
+    showStepDetails(ev, index);
+    updateDeleteButtonState();
   });
+  
   timeline.appendChild(div);
+  
+  // 빈 상태 메시지 숨기기
+  const stepsEmpty = document.getElementById('steps-empty');
+  if (stepsEmpty) {
+    stepsEmpty.classList.add('hidden');
+  }
+}
+
+/**
+ * 스텝에서 assertion 추가 처리
+ * @param {number} stepIndex - assertion을 추가할 스텝의 인덱스
+ * @param {string} assertionType - assertion 타입 (verifyText, verifyElementPresent 등)
+ * @param {object} stepEvent - 현재 스텝의 이벤트 객체
+ */
+/**
+ * 독립적인 assertion 추가 처리 (스텝에 귀속되지 않음, 맨 끝에 추가)
+ * @param {string} assertionType - assertion 타입
+ */
+function handleGlobalAssertion(assertionType) {
+  // assertion 타입에 따라 처리
+  if (assertionType === 'verifyTitle' || assertionType === 'verifyUrl') {
+    // 타이틀/URL 검증은 요소 선택 불필요 - 바로 추가
+    addVerifyAction(assertionType, null, null);
+    return;
+  }
+  
+  // 요소 검증은 요소 선택 필요
+  if (!selectionState.active) {
+    startSelectionWorkflow();
+  }
+  setElementStatus('검증할 요소를 선택하세요.', 'info');
+  // assertion을 pending으로 설정 (stepIndex 없음 = 맨 끝에 추가)
+  selectionState.pendingAction = assertionType;
+  selectionState.pendingStepIndex = null;
+  if (verifyActionsContainer) {
+    verifyActionsContainer.classList.add('hidden');
+  }
+  if (elementActionsContainer) {
+    elementActionsContainer.classList.remove('hidden');
+  }
+  
+  // step-details-panel도 표시해야 element-panel이 보임
+  const stepDetailsPanel = document.getElementById('step-details-panel');
+  if (stepDetailsPanel) {
+    stepDetailsPanel.classList.remove('hidden');
+  }
+  
+  // 요소 패널이 보이도록 보장
+  ensureElementPanelVisibility();
+}
+
+/**
+ * 스텝에 assertion 추가 처리
+ * @param {number} stepIndex - assertion을 추가할 기반 스텝의 인덱스
+ * @param {string} assertionType - assertion 타입 (verifyText, verifyElementPresent, verifyElementNotPresent, verifyTitle, verifyUrl)
+ * @param {Object} stepEvent - 기반 스텝의 이벤트 데이터
+ * 
+ * 셀렉터 선택 로직:
+ * 1. verifyTitle/verifyUrl: 요소 선택 불필요, 바로 추가
+ * 2. 기반 스텝에 셀렉터가 있는 경우: 기반 스텝의 셀렉터를 재사용 (같은 요소 검증)
+ * 3. 기반 스텝에 셀렉터가 없는 경우: 요소 선택 모드로 전환하여 새 요소 선택
+ */
+function handleStepAssertion(stepIndex, assertionType, stepEvent) {
+  // assertion 타입에 따라 처리
+  if (assertionType === 'verifyTitle' || assertionType === 'verifyUrl') {
+    // 타이틀/URL 검증은 요소 선택 불필요 - 바로 추가
+    addAssertionAfterStep(stepIndex, assertionType, null, null);
+    return;
+  }
+  
+  // 요소 검증은 요소 선택 필요
+  // 셀렉터 선택 우선순위: 기반 스텝의 셀렉터 재사용 > 새 요소 선택
+  if (stepEvent && stepEvent.selectorCandidates && stepEvent.selectorCandidates.length > 0) {
+    // 기반 스텝의 셀렉터를 재사용 (같은 요소에 대한 assertion)
+    const selectors = stepEvent.selectorCandidates;
+    const primarySelector = stepEvent.primarySelector || (selectors[0] && selectors[0].selector);
+    
+    let value = null;
+    if (assertionType === 'verifyText') {
+      // 텍스트 검증은 현재 요소의 텍스트를 가져와야 함
+      const textValue = prompt('검증할 텍스트를 입력하세요 (비워두면 현재 요소의 텍스트 사용):');
+      if (textValue === null) return; // 취소
+      value = textValue || null;
+    }
+    
+    // path 형태로 변환
+    const path = selectors.map(sel => ({
+      selector: sel.selector,
+      type: sel.type,
+      textValue: sel.textValue,
+      xpathValue: sel.xpathValue,
+      matchMode: sel.matchMode,
+      iframeContext: stepEvent.iframeContext
+    }));
+    
+    addAssertionAfterStep(stepIndex, assertionType, path, value);
+  } else {
+    // 요소 선택 모드로 전환
+    if (!selectionState.active) {
+      startSelectionWorkflow();
+    }
+    setElementStatus('검증할 요소를 선택하세요.', 'info');
+    // assertion을 pending으로 설정하고 스텝 인덱스 저장
+    selectionState.pendingAction = assertionType;
+    selectionState.pendingStepIndex = stepIndex;
+    if (verifyActionsContainer) {
+      verifyActionsContainer.classList.add('hidden');
+    }
+    if (elementActionsContainer) {
+      elementActionsContainer.classList.remove('hidden');
+    }
+    
+    // step-details-panel도 표시해야 element-panel이 보임
+    const stepDetailsPanel = document.getElementById('step-details-panel');
+    if (stepDetailsPanel) {
+      stepDetailsPanel.classList.remove('hidden');
+    }
+    ensureElementPanelVisibility();
+  }
+}
+
+/**
+ * 스텝 다음에 assertion 추가
+ * @param {number} stepIndex - assertion을 추가할 스텝의 인덱스
+ * @param {string} assertionType - assertion 타입
+ * @param {Array} path - 요소 선택 경로 (있는 경우)
+ * @param {string} value - 검증 값 (있는 경우)
+ */
+function addAssertionAfterStep(stepIndex, assertionType, path, value) {
+  withActiveTab((tab) => {
+    const timestamp = Date.now();
+    const currentUrl = tab?.url || '';
+    const currentTitle = tab?.title || '';
+    let eventRecord = null;
+    
+    if (path && path.length > 0) {
+      // 요소 기반 검증
+      const selectors = path.map((item, idx) => {
+        if (!item || !item.selector) return null;
+        const type = item.type || inferSelectorType(item.selector);
+        return {
+          selector: item.selector,
+          type,
+          textValue: item.textValue || null,
+          xpathValue: item.xpathValue || null,
+          matchMode: item.matchMode || null,
+          score: idx === path.length - 1 ? 100 : 80
+        };
+      }).filter(Boolean);
+      
+      if (!selectors.length) {
+        alert('셀렉터를 찾을 수 없습니다.');
+        return;
+      }
+      
+      const targetEntry = selectors[selectors.length - 1];
+      const iframeContext = path[path.length - 1]?.iframeContext || null;
+      
+      eventRecord = {
+        version: EVENT_SCHEMA_VERSION,
+        timestamp,
+        action: assertionType,
+        value: value || null,
+        tag: null,
+        selectorCandidates: selectors,
+        iframeContext,
+        page: {
+          url: currentUrl,
+          title: currentTitle
+        },
+        frame: { iframeContext },
+        target: null,
+        clientRect: null,
+        metadata: {
+          schemaVersion: EVENT_SCHEMA_VERSION,
+          userAgent: navigator.userAgent
+        },
+        manual: {
+          id: `verify-${timestamp}`,
+          type: assertionType,
+          resultName: null,
+          attributeName: null
+        },
+        primarySelector: targetEntry.selector,
+        primarySelectorType: targetEntry.type,
+        primarySelectorText: targetEntry.textValue,
+        primarySelectorXPath: targetEntry.xpathValue,
+        primarySelectorMatchMode: targetEntry.matchMode
+      };
+    } else {
+      // 타이틀/URL 검증 (요소 불필요)
+      if (assertionType === 'verifyTitle') {
+        value = value || currentTitle;
+      } else if (assertionType === 'verifyUrl') {
+        value = value || currentUrl;
+      }
+      
+      eventRecord = {
+        version: EVENT_SCHEMA_VERSION,
+        timestamp,
+        action: assertionType,
+        value: value,
+        tag: null,
+        selectorCandidates: [],
+        iframeContext: null,
+        page: {
+          url: currentUrl,
+          title: currentTitle
+        },
+        frame: { iframeContext: null },
+        target: null,
+        clientRect: null,
+        metadata: {
+          schemaVersion: EVENT_SCHEMA_VERSION,
+          userAgent: navigator.userAgent
+        },
+        manual: {
+          id: `verify-${timestamp}`,
+          type: assertionType,
+          resultName: null,
+          attributeName: null
+        },
+        primarySelector: null,
+        primarySelectorType: null
+      };
+    }
+    
+    // 현재 이벤트 배열에 삽입 (stepIndex 다음에)
+    const insertIndex = stepIndex + 1;
+    const updatedEvents = [...allEvents];
+    updatedEvents.splice(insertIndex, 0, eventRecord);
+    
+    // storage에 저장
+    chrome.storage.local.set({ events: updatedEvents }, () => {
+      if (chrome.runtime.lastError) {
+        console.error('[AI Test Recorder] Failed to add assertion:', chrome.runtime.lastError);
+        alert('Assertion을 추가할 수 없습니다.');
+        return;
+      }
+      
+      // 타임라인 업데이트 및 코드 갱신
+      const normalized = syncTimelineFromEvents(updatedEvents, {
+        preserveSelection: false,
+        selectLast: false,
+        resetAiState: false
+      });
+      // allEvents가 syncTimelineFromEvents에서 업데이트되므로 normalized를 사용
+      updateCode({ preloadedEvents: normalized });
+    });
+  });
+}
+
+// 단계 상세 정보 표시
+function showStepDetails(ev, index) {
+  const stepDetailsPanel = document.getElementById('step-details-panel');
+  if (stepDetailsPanel) {
+    stepDetailsPanel.classList.remove('hidden');
+    // 해당 이벤트의 셀렉터 표시
+    showSelectors(ev.selectorCandidates || [], ev, index);
+    showIframe(ev.iframeContext);
+  }
 }
 
 function showSelectors(list, event, eventIndex) {
@@ -3114,10 +3803,19 @@ function updateElementButtonState() {
 
 function ensureElementPanelVisibility() {
   if (!elementPanel) return;
+  
+  const stepDetailsPanel = document.getElementById('step-details-panel');
+  
   if (selectionState.active || selectionState.stack.length > 0) {
     elementPanel.classList.remove('hidden');
+    // 부모 패널도 표시해야 요소 선택 UI가 보임
+    if (stepDetailsPanel) {
+      stepDetailsPanel.classList.remove('hidden');
+    }
   } else {
     elementPanel.classList.add('hidden');
+    // 요소 선택이 비활성화되어도 step-details-panel은 유지할 수 있음
+    // (다른 목적으로 사용 중일 수 있으므로)
   }
 }
 
@@ -3652,10 +4350,11 @@ function convertEventToKeywordStep(electronEvent, stepNumber) {
   // action별 인자 구성
   switch (electronEvent.action) {
     case 'goto':
+    case 'navigate':
     case 'open':
-      step.args = [electronEvent.target]; // URL
+      step.args = [electronEvent.target || electronEvent.value || electronEvent.url]; // URL
       step.metadata = {
-        url: electronEvent.url,
+        url: electronEvent.url || electronEvent.value || electronEvent.target,
         title: electronEvent.title
       };
       break;
@@ -3928,7 +4627,7 @@ function handleVerifyAction(verifyType) {
   if (!path.length) {
     // 요소 선택 모드로 전환
     if (!selectionState.active) {
-      startElementSelection();
+      startSelectionWorkflow();
     }
     setElementStatus('검증할 요소를 선택하세요.', 'info');
     // verify 액션을 pending으로 설정
@@ -3980,7 +4679,7 @@ function handleWaitAction(waitType) {
     if (!path.length) {
       // 요소 선택 모드로 전환
       if (!selectionState.active) {
-        startElementSelection();
+        startSelectionWorkflow();
       }
       setElementStatus('대기할 요소를 선택하세요.', 'info');
       selectionState.pendingAction = 'waitForElement';
@@ -4008,7 +4707,7 @@ function handleInteractionAction(interactionType) {
     if (!path.length) {
       // 요소 선택 모드로 전환
       if (!selectionState.active) {
-        startElementSelection();
+        startSelectionWorkflow();
       }
       setElementStatus('입력할 요소를 선택하세요.', 'info');
       selectionState.pendingAction = 'type';
@@ -4030,7 +4729,7 @@ function handleInteractionAction(interactionType) {
   if (interactionType === 'select') {
     if (!path.length) {
       if (!selectionState.active) {
-        startElementSelection();
+        startSelectionWorkflow();
       }
       setElementStatus('선택할 드롭다운 요소를 선택하세요.', 'info');
       selectionState.pendingAction = 'select';
@@ -4052,7 +4751,7 @@ function handleInteractionAction(interactionType) {
   // click, doubleClick, rightClick, hover, clear는 요소만 필요
   if (!path.length) {
     if (!selectionState.active) {
-      startElementSelection();
+      startSelectionWorkflow();
     }
     setElementStatus(`${interactionType}할 요소를 선택하세요.`, 'info');
     selectionState.pendingAction = interactionType;
@@ -4582,8 +5281,16 @@ function applySelectionAction(actionType, options = {}) {
           value = textValue;
         }
       }
-      addVerifyAction(pending, path, value);
-      selectionState.pendingAction = null;
+      // pendingStepIndex가 있으면 해당 스텝 다음에 추가
+      if (selectionState.pendingStepIndex !== null && selectionState.pendingStepIndex !== undefined) {
+        addAssertionAfterStep(selectionState.pendingStepIndex, pending, path, value);
+        selectionState.pendingAction = null;
+        selectionState.pendingStepIndex = null;
+      } else {
+        // 기존 방식 (맨 끝에 추가)
+        addVerifyAction(pending, path, value);
+        selectionState.pendingAction = null;
+      }
       cancelSelectionWorkflow('', 'info');
       return;
     } else if (pending === 'waitForElement') {
@@ -4617,6 +5324,67 @@ function applySelectionAction(actionType, options = {}) {
   }
   
   if (actionType === 'commit') {
+    // pendingAction이 있으면 먼저 처리 (verify, wait, interaction 등)
+    if (selectionState.pendingAction) {
+      const pending = selectionState.pendingAction;
+      if (pending.startsWith('verify')) {
+        let value = null;
+        if (pending === 'verifyText') {
+          const lastPathItem = path[path.length - 1];
+          if (lastPathItem && lastPathItem.textValue) {
+            value = lastPathItem.textValue;
+          } else {
+            const textValue = prompt('검증할 텍스트를 입력하세요:');
+            if (textValue === null) {
+              selectionState.pendingAction = null;
+              return;
+            }
+            value = textValue;
+          }
+        }
+        // pendingStepIndex가 있으면 해당 스텝 다음에 추가
+        if (selectionState.pendingStepIndex !== null && selectionState.pendingStepIndex !== undefined) {
+          addAssertionAfterStep(selectionState.pendingStepIndex, pending, path, value);
+          selectionState.pendingAction = null;
+          selectionState.pendingStepIndex = null;
+        } else {
+          // 기존 방식 (맨 끝에 추가)
+          addVerifyAction(pending, path, value);
+          selectionState.pendingAction = null;
+        }
+        cancelSelectionWorkflow('', 'info');
+        return;
+      } else if (pending === 'waitForElement') {
+        addWaitAction('waitForElement', null, path);
+        selectionState.pendingAction = null;
+        cancelSelectionWorkflow('', 'info');
+        return;
+      } else if (['click', 'doubleClick', 'rightClick', 'hover', 'clear', 'type', 'select'].includes(pending)) {
+        // 상호작용 액션 처리
+        let value = null;
+        if (pending === 'type') {
+          const inputValue = prompt('입력할 텍스트를 입력하세요:');
+          if (inputValue === null) {
+            selectionState.pendingAction = null;
+            return;
+          }
+          value = inputValue;
+        } else if (pending === 'select') {
+          const selectValue = prompt('선택할 옵션의 텍스트 또는 값을 입력하세요:');
+          if (selectValue === null) {
+            selectionState.pendingAction = null;
+            return;
+          }
+          value = selectValue;
+        }
+        addInteractionAction(pending, path, value);
+        selectionState.pendingAction = null;
+        cancelSelectionWorkflow('', 'info');
+        return;
+      }
+    }
+    
+    // pendingAction이 없으면 일반 commit 처리
     const entry = buildManualActionEntry('chain', path, options);
     if (!entry) {
       setElementStatus('현재 선택을 코드에 반영할 수 없습니다.', 'error');
@@ -5619,6 +6387,16 @@ function buildPlaywrightLocatorExpressionForAction(base, selectorInfo, pythonLik
 }
 
 function buildPlaywrightPythonAction(ev, selectorInfo, base = 'page') {
+  // Assertion actions that don't require selector
+  if (ev && (ev.action === 'verifyTitle' || ev.action === 'verifyUrl')) {
+    const value = escapeForPythonString(ev.value || '');
+    if (ev.action === 'verifyTitle') {
+      return `assert ${base}.title() == "${value}"`;
+    }
+    if (ev.action === 'verifyUrl') {
+      return `assert ${base}.url == "${value}"`;
+    }
+  }
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
   const locatorExpr = buildPlaywrightLocatorExpressionForAction(base, selectorInfo, true);
   const value = escapeForPythonString(ev.value || '');
@@ -5656,10 +6434,39 @@ function buildPlaywrightPythonAction(ev, selectorInfo, base = 'page') {
     }
     return `${getLocator()}.select_option()`;
   }
+  // Assertion actions
+  if (ev.action === 'verifyText') {
+    const expectedText = escapeForPythonString(value || '');
+    return `assert ${getLocator()}.inner_text() == "${expectedText}"`;
+  }
+  if (ev.action === 'verifyElementPresent') {
+    return `assert ${getLocator()}.is_visible()`;
+  }
+  if (ev.action === 'verifyElementNotPresent') {
+    return `assert ${getLocator()}.is_hidden()`;
+  }
+  if (ev.action === 'verifyTitle') {
+    const expectedTitle = escapeForPythonString(value || '');
+    return `assert ${base}.title() == "${expectedTitle}"`;
+  }
+  if (ev.action === 'verifyUrl') {
+    const expectedUrl = escapeForPythonString(value || '');
+    return `assert ${base}.url == "${expectedUrl}"`;
+  }
   return null;
 }
 
 function buildPlaywrightJSAction(ev, selectorInfo, base = 'page') {
+  // Assertion actions that don't require selector
+  if (ev && (ev.action === 'verifyTitle' || ev.action === 'verifyUrl')) {
+    const value = escapeForJSString(ev.value || '');
+    if (ev.action === 'verifyTitle') {
+      return `expect(await ${base}.title()).toBe("${value}");`;
+    }
+    if (ev.action === 'verifyUrl') {
+      return `expect(${base}.url()).toBe("${value}");`;
+    }
+  }
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
   const locatorExpr = buildPlaywrightLocatorExpressionForAction(base, selectorInfo, false);
   const value = escapeForJSString(ev.value || '');
@@ -5697,10 +6504,39 @@ function buildPlaywrightJSAction(ev, selectorInfo, base = 'page') {
     }
     return `await ${getLocator()}.selectOption();`;
   }
+  // Assertion actions
+  if (ev.action === 'verifyText') {
+    const expectedText = escapeForJSString(value || '');
+    return `expect(await ${getLocator()}.innerText()).toBe("${expectedText}");`;
+  }
+  if (ev.action === 'verifyElementPresent') {
+    return `expect(await ${getLocator()}.isVisible()).toBe(true);`;
+  }
+  if (ev.action === 'verifyElementNotPresent') {
+    return `expect(await ${getLocator()}.isHidden()).toBe(true);`;
+  }
+  if (ev.action === 'verifyTitle') {
+    const expectedTitle = escapeForJSString(value || '');
+    return `expect(await ${base}.title()).toBe("${expectedTitle}");`;
+  }
+  if (ev.action === 'verifyUrl') {
+    const expectedUrl = escapeForJSString(value || '');
+    return `expect(${base}.url()).toBe("${expectedUrl}");`;
+  }
   return null;
 }
 
 function buildSeleniumPythonAction(ev, selectorInfo, driverVar = 'driver') {
+  // Assertion actions that don't require selector
+  if (ev && (ev.action === 'verifyTitle' || ev.action === 'verifyUrl')) {
+    const value = escapeForPythonString(ev.value || '');
+    if (ev.action === 'verifyTitle') {
+      return `assert ${driverVar}.title == "${value}"`;
+    }
+    if (ev.action === 'verifyUrl') {
+      return `assert ${driverVar}.current_url == "${value}"`;
+    }
+  }
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
   const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
   const value = escapeForPythonString(ev.value || '');
@@ -5756,10 +6592,39 @@ function buildSeleniumPythonAction(ev, selectorInfo, driverVar = 'driver') {
     }
     return `Select(${element})`;
   }
+  // Assertion actions
+  if (ev.action === 'verifyText') {
+    const expectedText = escapeForPythonString(value || '');
+    return `assert ${element}.text == "${expectedText}"`;
+  }
+  if (ev.action === 'verifyElementPresent') {
+    return `assert ${element}.is_displayed()`;
+  }
+  if (ev.action === 'verifyElementNotPresent') {
+    return `try:\n    ${element}.is_displayed()\n    assert False, "Element should not be present"\nexcept:\n    pass`;
+  }
+  if (ev.action === 'verifyTitle') {
+    const expectedTitle = escapeForPythonString(value || '');
+    return `assert ${driverVar}.title == "${expectedTitle}"`;
+  }
+  if (ev.action === 'verifyUrl') {
+    const expectedUrl = escapeForPythonString(value || '');
+    return `assert ${driverVar}.current_url == "${expectedUrl}"`;
+  }
   return null;
 }
 
 function buildSeleniumJSAction(ev, selectorInfo) {
+  // Assertion actions that don't require selector
+  if (ev && (ev.action === 'verifyTitle' || ev.action === 'verifyUrl')) {
+    const value = escapeForJSString(ev.value || '');
+    if (ev.action === 'verifyTitle') {
+      return `  expect(await driver.getTitle()).toBe("${value}");`;
+    }
+    if (ev.action === 'verifyUrl') {
+      return `  expect(await driver.getCurrentUrl()).toBe("${value}");`;
+    }
+  }
   if (!ev || !selectorInfo || !selectorInfo.selector) return null;
   const selectorType = selectorInfo.type || inferSelectorType(selectorInfo.selector);
   const value = escapeForJSString(ev.value || '');
@@ -5814,6 +6679,25 @@ function buildSeleniumJSAction(ev, selectorInfo) {
       return `  await new Select(${element}).selectByVisibleText("${value}");`;
     }
     return `  await new Select(${element});`;
+  }
+  // Assertion actions
+  if (ev.action === 'verifyText') {
+    const expectedText = escapeForJSString(value || '');
+    return `  expect(await ${element}.getText()).toBe("${expectedText}");`;
+  }
+  if (ev.action === 'verifyElementPresent') {
+    return `  expect(await ${element}.isDisplayed()).toBe(true);`;
+  }
+  if (ev.action === 'verifyElementNotPresent') {
+    return `  await expect(async () => { await ${element}.isDisplayed(); }).rejects.toThrow();`;
+  }
+  if (ev.action === 'verifyTitle') {
+    const expectedTitle = escapeForJSString(value || '');
+    return `  expect(await driver.getTitle()).toBe("${expectedTitle}");`;
+  }
+  if (ev.action === 'verifyUrl') {
+    const expectedUrl = escapeForJSString(value || '');
+    return `  expect(await driver.getCurrentUrl()).toBe("${expectedUrl}");`;
   }
   return null;
 }

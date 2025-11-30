@@ -231,9 +231,9 @@ function checkUrlChange() {
   const currentTitle = document.title;
   
   if (currentUrl !== lastUrl || currentTitle !== lastTitle) {
-    // URL 변경 감지 - value에 URL 저장
+    // URL 변경 감지 - navigate 액션으로 저장 (UI와 일치)
     const eventRecord = createEventRecord({
-      action: 'goto',
+      action: 'navigate',
       value: currentUrl,
       selectors: [],
       target: null,
@@ -248,6 +248,9 @@ function checkUrlChange() {
       url: currentUrl,
       title: currentTitle
     };
+    
+    // url 필드 추가 (UI에서 사용)
+    eventRecord.url = currentUrl;
     
     // primarySelector에 URL 저장 (target 대신)
     eventRecord.primarySelector = currentUrl;
@@ -288,6 +291,33 @@ export function startRecording(options = {}) {
   // URL 변경 감지 초기화
   lastUrl = window.location.href;
   lastTitle = document.title;
+  
+  // URL 체크 interval 시작 (아직 시작되지 않은 경우)
+  if (!urlCheckInterval) {
+    urlCheckInterval = setInterval(() => {
+      try {
+        checkUrlChange();
+      } catch (err) {
+        console.error('[AI Test Recorder] Failed to check URL change:', err);
+      }
+    }, 1000);
+  }
+  
+  // 페이지 언로드 시 URL 변경 감지 (실제 페이지 이동)
+  window.addEventListener('beforeunload', () => {
+    if (recorderState.isRecording) {
+      checkUrlChange();
+    }
+  });
+  
+  // 페이지 로드 완료 시 URL 확인
+  if (document.readyState === 'complete') {
+    setTimeout(checkUrlChange, 500);
+  } else {
+    window.addEventListener('load', () => {
+      setTimeout(checkUrlChange, 500);
+    });
+  }
 }
 
 export function stopRecording() {
@@ -390,14 +420,32 @@ export function initRecorderListeners() {
     setTimeout(checkUrlChange, 100);
   };
 
-  // 주기적으로 URL 변경 확인 (SPA 대응)
-  urlCheckInterval = setInterval(() => {
-    try {
+  // 주기적으로 URL 변경 확인 (SPA 대응) - startRecording에서 이미 시작했으면 중복 시작하지 않음
+  if (!urlCheckInterval) {
+    urlCheckInterval = setInterval(() => {
+      try {
+        checkUrlChange();
+      } catch (err) {
+        console.error('[AI Test Recorder] Failed to check URL change:', err);
+      }
+    }, 1000);
+  }
+  
+  // 실제 페이지 이동 감지 (전체 페이지 로드)
+  window.addEventListener('beforeunload', () => {
+    if (recorderState.isRecording) {
       checkUrlChange();
-    } catch (err) {
-      console.error('[AI Test Recorder] Failed to check URL change:', err);
     }
-  }, 1000);
+  });
+  
+  // 페이지 로드 완료 시 URL 확인
+  if (document.readyState === 'complete') {
+    setTimeout(checkUrlChange, 500);
+  } else {
+    window.addEventListener('load', () => {
+      setTimeout(checkUrlChange, 500);
+    });
+  }
 }
 
 export function getRecordingState() {

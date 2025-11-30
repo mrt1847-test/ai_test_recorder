@@ -2727,7 +2727,7 @@
     const currentTitle = document.title;
     if (currentUrl !== lastUrl || currentTitle !== lastTitle) {
       const eventRecord = createEventRecord({
-        action: "goto",
+        action: "navigate",
         value: currentUrl,
         selectors: [],
         target: null,
@@ -2740,6 +2740,7 @@
         url: currentUrl,
         title: currentTitle
       };
+      eventRecord.url = currentUrl;
       eventRecord.primarySelector = currentUrl;
       persistEvent(eventRecord);
       broadcastRecordedEvent(eventRecord);
@@ -2769,6 +2770,27 @@
     removeHighlight();
     lastUrl = window.location.href;
     lastTitle = document.title;
+    if (!urlCheckInterval) {
+      urlCheckInterval = setInterval(() => {
+        try {
+          checkUrlChange();
+        } catch (err) {
+          console.error("[AI Test Recorder] Failed to check URL change:", err);
+        }
+      }, 1e3);
+    }
+    window.addEventListener("beforeunload", () => {
+      if (recorderState.isRecording) {
+        checkUrlChange();
+      }
+    });
+    if (document.readyState === "complete") {
+      setTimeout(checkUrlChange, 500);
+    } else {
+      window.addEventListener("load", () => {
+        setTimeout(checkUrlChange, 500);
+      });
+    }
   }
   function stopRecording() {
     recorderState.isRecording = false;
@@ -2840,13 +2862,27 @@
       originalReplaceState.apply(history, args);
       setTimeout(checkUrlChange, 100);
     };
-    urlCheckInterval = setInterval(() => {
-      try {
+    if (!urlCheckInterval) {
+      urlCheckInterval = setInterval(() => {
+        try {
+          checkUrlChange();
+        } catch (err) {
+          console.error("[AI Test Recorder] Failed to check URL change:", err);
+        }
+      }, 1e3);
+    }
+    window.addEventListener("beforeunload", () => {
+      if (recorderState.isRecording) {
         checkUrlChange();
-      } catch (err) {
-        console.error("[AI Test Recorder] Failed to check URL change:", err);
       }
-    }, 1e3);
+    });
+    if (document.readyState === "complete") {
+      setTimeout(checkUrlChange, 500);
+    } else {
+      window.addEventListener("load", () => {
+        setTimeout(checkUrlChange, 500);
+      });
+    }
   }
   function getRecordingState() {
     return recorderState.isRecording;
