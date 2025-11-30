@@ -1144,6 +1144,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // 코드 변경 이벤트 전송
+  if (msg && msg.type === 'CODE_UPDATED') {
+    sendWebSocketMessage({
+      type: 'code-updated',
+      code: msg.code,
+      eventsCount: msg.eventsCount,
+      framework: msg.framework,
+      language: msg.language,
+      sessionId: msg.sessionId,
+      timestamp: Date.now()
+    });
+    sendResponse({ ok: true });
+    return true;
+  }
+
   return false;
 });
 

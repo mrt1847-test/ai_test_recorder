@@ -2721,11 +2721,22 @@
   }
   var lastUrl = window.location.href;
   var lastTitle = document.title;
-  function checkUrlChange() {
+  async function checkUrlChange() {
     if (!recorderState.isRecording) return;
     const currentUrl = window.location.href;
     const currentTitle = document.title;
-    if (currentUrl !== lastUrl || currentTitle !== lastTitle) {
+    let storedLastUrl = lastUrl;
+    try {
+      const result = await chrome.storage.local.get(["lastRecordedUrl"]);
+      if (result.lastRecordedUrl && result.lastRecordedUrl !== currentUrl) {
+        storedLastUrl = result.lastRecordedUrl;
+      }
+    } catch (err) {
+    }
+    const compareUrl = storedLastUrl && storedLastUrl !== currentUrl ? storedLastUrl : lastUrl;
+    const urlChanged = currentUrl !== compareUrl;
+    const titleChanged = currentTitle !== lastTitle;
+    if (urlChanged || titleChanged) {
       const eventRecord = createEventRecord({
         action: "navigate",
         value: currentUrl,
@@ -2744,6 +2755,11 @@
       eventRecord.primarySelector = currentUrl;
       persistEvent(eventRecord);
       broadcastRecordedEvent(eventRecord);
+      try {
+        chrome.storage.local.set({ lastRecordedUrl: currentUrl });
+      } catch (err) {
+        console.error("[AI Test Recorder] Failed to save last URL:", err);
+      }
       lastUrl = currentUrl;
       lastTitle = currentTitle;
     }
@@ -2768,8 +2784,21 @@
       chrome.storage.local.set({ recording: true });
     }
     removeHighlight();
-    lastUrl = window.location.href;
-    lastTitle = document.title;
+    const currentUrl = window.location.href;
+    const currentTitle = document.title;
+    chrome.storage.local.get(["lastRecordedUrl"], (result) => {
+      if (result.lastRecordedUrl && result.lastRecordedUrl !== currentUrl) {
+        lastUrl = result.lastRecordedUrl;
+        lastTitle = "";
+        setTimeout(() => {
+          checkUrlChange();
+        }, 100);
+      } else {
+        lastUrl = currentUrl;
+        lastTitle = currentTitle;
+        chrome.storage.local.set({ lastRecordedUrl: currentUrl });
+      }
+    });
     if (!urlCheckInterval) {
       urlCheckInterval = setInterval(() => {
         try {
@@ -2781,14 +2810,29 @@
     }
     window.addEventListener("beforeunload", () => {
       if (recorderState.isRecording) {
-        checkUrlChange();
+        try {
+          chrome.storage.local.set({ lastRecordedUrl: window.location.href });
+        } catch (err) {
+          console.error("[AI Test Recorder] Failed to save URL on beforeunload:", err);
+        }
       }
     });
     if (document.readyState === "complete") {
-      setTimeout(checkUrlChange, 500);
+      setTimeout(() => {
+        checkUrlChange();
+      }, 500);
     } else {
       window.addEventListener("load", () => {
-        setTimeout(checkUrlChange, 500);
+        setTimeout(() => {
+          checkUrlChange();
+        }, 500);
+      });
+    }
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => {
+        setTimeout(() => {
+          checkUrlChange();
+        }, 300);
       });
     }
   }
@@ -2873,16 +2917,47 @@
     }
     window.addEventListener("beforeunload", () => {
       if (recorderState.isRecording) {
-        checkUrlChange();
+        try {
+          chrome.storage.local.set({ lastRecordedUrl: window.location.href });
+        } catch (err) {
+          console.error("[AI Test Recorder] Failed to save URL on beforeunload:", err);
+        }
       }
     });
     if (document.readyState === "complete") {
-      setTimeout(checkUrlChange, 500);
+      setTimeout(() => {
+        checkUrlChange();
+      }, 500);
     } else {
       window.addEventListener("load", () => {
-        setTimeout(checkUrlChange, 500);
+        setTimeout(() => {
+          checkUrlChange();
+        }, 500);
       });
     }
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => {
+        setTimeout(() => {
+          checkUrlChange();
+        }, 300);
+      });
+    }
+    chrome.storage.local.get(["recording", "lastRecordedUrl"], (result) => {
+      if (result.recording) {
+        const currentUrl = window.location.href;
+        if (result.lastRecordedUrl && result.lastRecordedUrl !== currentUrl) {
+          lastUrl = result.lastRecordedUrl;
+          lastTitle = "";
+          setTimeout(() => {
+            checkUrlChange();
+          }, 200);
+        } else {
+          lastUrl = currentUrl;
+          lastTitle = document.title;
+          chrome.storage.local.set({ lastRecordedUrl: currentUrl });
+        }
+      }
+    });
   }
   function getRecordingState() {
     return recorderState.isRecording;

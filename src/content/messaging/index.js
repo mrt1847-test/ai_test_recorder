@@ -30,6 +30,12 @@ export function initMessageBridge() {
         case 'RECORDING_START': {
           // 녹화를 시작하면서 기존 이벤트를 초기화.
           startRecording({ resetEvents: true });
+          
+          // Session ID 저장 (Electron 연동용)
+          if (message.sessionId) {
+            setCurrentSessionId(message.sessionId);
+          }
+          
           sendResponse({ ok: true });
           return;
         }

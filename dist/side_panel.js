@@ -5324,6 +5324,67 @@ function applySelectionAction(actionType, options = {}) {
   }
   
   if (actionType === 'commit') {
+    // pendingAction이 있으면 먼저 처리 (verify, wait, interaction 등)
+    if (selectionState.pendingAction) {
+      const pending = selectionState.pendingAction;
+      if (pending.startsWith('verify')) {
+        let value = null;
+        if (pending === 'verifyText') {
+          const lastPathItem = path[path.length - 1];
+          if (lastPathItem && lastPathItem.textValue) {
+            value = lastPathItem.textValue;
+          } else {
+            const textValue = prompt('검증할 텍스트를 입력하세요:');
+            if (textValue === null) {
+              selectionState.pendingAction = null;
+              return;
+            }
+            value = textValue;
+          }
+        }
+        // pendingStepIndex가 있으면 해당 스텝 다음에 추가
+        if (selectionState.pendingStepIndex !== null && selectionState.pendingStepIndex !== undefined) {
+          addAssertionAfterStep(selectionState.pendingStepIndex, pending, path, value);
+          selectionState.pendingAction = null;
+          selectionState.pendingStepIndex = null;
+        } else {
+          // 기존 방식 (맨 끝에 추가)
+          addVerifyAction(pending, path, value);
+          selectionState.pendingAction = null;
+        }
+        cancelSelectionWorkflow('', 'info');
+        return;
+      } else if (pending === 'waitForElement') {
+        addWaitAction('waitForElement', null, path);
+        selectionState.pendingAction = null;
+        cancelSelectionWorkflow('', 'info');
+        return;
+      } else if (['click', 'doubleClick', 'rightClick', 'hover', 'clear', 'type', 'select'].includes(pending)) {
+        // 상호작용 액션 처리
+        let value = null;
+        if (pending === 'type') {
+          const inputValue = prompt('입력할 텍스트를 입력하세요:');
+          if (inputValue === null) {
+            selectionState.pendingAction = null;
+            return;
+          }
+          value = inputValue;
+        } else if (pending === 'select') {
+          const selectValue = prompt('선택할 옵션의 텍스트 또는 값을 입력하세요:');
+          if (selectValue === null) {
+            selectionState.pendingAction = null;
+            return;
+          }
+          value = selectValue;
+        }
+        addInteractionAction(pending, path, value);
+        selectionState.pendingAction = null;
+        cancelSelectionWorkflow('', 'info');
+        return;
+      }
+    }
+    
+    // pendingAction이 없으면 일반 commit 처리
     const entry = buildManualActionEntry('chain', path, options);
     if (!entry) {
       setElementStatus('현재 선택을 코드에 반영할 수 없습니다.', 'error');

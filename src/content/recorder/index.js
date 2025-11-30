@@ -18,11 +18,58 @@ function persistEvent(eventRecord) {
   chrome.runtime.sendMessage({ type: 'SAVE_EVENT', event: eventRecord }, () => {});
 }
 
+// 현재 세션 ID 저장
+let currentSessionId = null;
+
 /**
- * 새 이벤트를 DevTools 패널로 브로드캐스트한다.
+ * 현재 세션 ID 설정
+ */
+export function setCurrentSessionId(sessionId) {
+  currentSessionId = sessionId;
+  // window 객체에도 저장 (다른 모듈에서 접근 가능)
+  if (typeof window !== 'undefined') {
+    window.__ai_test_recorder_session_id__ = sessionId;
+  }
+}
+
+/**
+ * 현재 세션 ID 가져오기
+ */
+function getCurrentSessionId() {
+  // 먼저 로컬 변수 확인
+  if (currentSessionId) {
+    return currentSessionId;
+  }
+  // window 객체에서 확인
+  if (typeof window !== 'undefined' && window.__ai_test_recorder_session_id__) {
+    return window.__ai_test_recorder_session_id__;
+  }
+  // storage에서 확인 (fallback)
+  try {
+    chrome.storage.local.get(['recordingData'], (result) => {
+      if (result.recordingData && result.recordingData.sessionId) {
+        currentSessionId = result.recordingData.sessionId;
+      }
+    });
+  } catch (err) {
+    // ignore
+  }
+  return currentSessionId;
+}
+
+/**
+ * 새 이벤트를 DevTools 패널로 브로드캐스트하고 Electron에도 실시간 전송한다.
  */
 function broadcastRecordedEvent(eventRecord) {
+  // 기존: DevTools 패널로 전송
   chrome.runtime.sendMessage({ type: 'EVENT_RECORDED', event: eventRecord }, () => {});
+  
+  // 추가: Electron으로 실시간 전송
+  chrome.runtime.sendMessage({ 
+    type: 'DOM_EVENT', 
+    event: eventRecord,
+    sessionId: getCurrentSessionId()
+  }, () => {});
 }
 
 /**
@@ -224,13 +271,30 @@ function handleSelect(event) {
 let lastUrl = window.location.href;
 let lastTitle = document.title;
 
-function checkUrlChange() {
+async function checkUrlChange() {
   if (!recorderState.isRecording) return;
   
   const currentUrl = window.location.href;
   const currentTitle = document.title;
   
-  if (currentUrl !== lastUrl || currentTitle !== lastTitle) {
+  // storage에서 마지막 URL 가져오기 (전체 페이지 로드 시에도 비교 가능)
+  let storedLastUrl = lastUrl;
+  try {
+    const result = await chrome.storage.local.get(['lastRecordedUrl']);
+    if (result.lastRecordedUrl && result.lastRecordedUrl !== currentUrl) {
+      storedLastUrl = result.lastRecordedUrl;
+    }
+  } catch (err) {
+    // storage 접근 실패 시 로컬 변수 사용
+  }
+  
+  // URL 또는 타이틀이 변경되었는지 확인
+  // storedLastUrl이 있으면 우선적으로 사용 (전체 페이지 로드 시)
+  const compareUrl = storedLastUrl && storedLastUrl !== currentUrl ? storedLastUrl : lastUrl;
+  const urlChanged = currentUrl !== compareUrl;
+  const titleChanged = currentTitle !== lastTitle;
+  
+  if (urlChanged || titleChanged) {
     // URL 변경 감지 - navigate 액션으로 저장 (UI와 일치)
     const eventRecord = createEventRecord({
       action: 'navigate',
@@ -257,6 +321,13 @@ function checkUrlChange() {
     
     persistEvent(eventRecord);
     broadcastRecordedEvent(eventRecord);
+    
+    // storage에 현재 URL 저장 (다음 페이지 로드 시 비교용)
+    try {
+      chrome.storage.local.set({ lastRecordedUrl: currentUrl });
+    } catch (err) {
+      console.error('[AI Test Recorder] Failed to save last URL:', err);
+    }
     
     lastUrl = currentUrl;
     lastTitle = currentTitle;
@@ -288,9 +359,30 @@ export function startRecording(options = {}) {
   }
   removeHighlight();
   
-  // URL 변경 감지 초기화
-  lastUrl = window.location.href;
-  lastTitle = document.title;
+  // URL 변경 감지 초기화 - storage에서 이전 URL 가져오기 (전체 페이지 로드 시 비교용)
+  const currentUrl = window.location.href;
+  const currentTitle = document.title;
+  
+  // storage에서 이전 URL 가져오기
+  chrome.storage.local.get(['lastRecordedUrl'], (result) => {
+    if (result.lastRecordedUrl && result.lastRecordedUrl !== currentUrl) {
+      // 이전 URL이 있고 현재 URL과 다르면 navigate 이벤트 기록
+      lastUrl = result.lastRecordedUrl;
+      lastTitle = ''; // 이전 타이틀은 알 수 없으므로 빈 문자열
+      
+      // URL 변경 이벤트 기록
+      setTimeout(() => {
+        checkUrlChange();
+      }, 100);
+    } else {
+      // 이전 URL이 없거나 같으면 현재 URL로 초기화
+      lastUrl = currentUrl;
+      lastTitle = currentTitle;
+      
+      // storage에 현재 URL 저장
+      chrome.storage.local.set({ lastRecordedUrl: currentUrl });
+    }
+  });
   
   // URL 체크 interval 시작 (아직 시작되지 않은 경우)
   if (!urlCheckInterval) {
@@ -303,19 +395,36 @@ export function startRecording(options = {}) {
     }, 1000);
   }
   
-  // 페이지 언로드 시 URL 변경 감지 (실제 페이지 이동)
+  // 페이지 언로드 시 현재 URL 저장 (다음 페이지에서 비교용)
   window.addEventListener('beforeunload', () => {
     if (recorderState.isRecording) {
-      checkUrlChange();
+      try {
+        chrome.storage.local.set({ lastRecordedUrl: window.location.href });
+      } catch (err) {
+        console.error('[AI Test Recorder] Failed to save URL on beforeunload:', err);
+      }
     }
   });
   
-  // 페이지 로드 완료 시 URL 확인
+  // 페이지 로드 완료 시 URL 확인 (전체 페이지 로드 후)
   if (document.readyState === 'complete') {
-    setTimeout(checkUrlChange, 500);
+    setTimeout(() => {
+      checkUrlChange();
+    }, 500);
   } else {
     window.addEventListener('load', () => {
-      setTimeout(checkUrlChange, 500);
+      setTimeout(() => {
+        checkUrlChange();
+      }, 500);
+    });
+  }
+  
+  // DOMContentLoaded 시에도 확인 (더 빠른 감지)
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      setTimeout(() => {
+        checkUrlChange();
+      }, 300);
     });
   }
 }
@@ -434,18 +543,60 @@ export function initRecorderListeners() {
   // 실제 페이지 이동 감지 (전체 페이지 로드)
   window.addEventListener('beforeunload', () => {
     if (recorderState.isRecording) {
-      checkUrlChange();
+      try {
+        chrome.storage.local.set({ lastRecordedUrl: window.location.href });
+      } catch (err) {
+        console.error('[AI Test Recorder] Failed to save URL on beforeunload:', err);
+      }
     }
   });
   
-  // 페이지 로드 완료 시 URL 확인
+  // 페이지 로드 완료 시 URL 확인 (전체 페이지 로드 후)
   if (document.readyState === 'complete') {
-    setTimeout(checkUrlChange, 500);
+    setTimeout(() => {
+      checkUrlChange();
+    }, 500);
   } else {
     window.addEventListener('load', () => {
-      setTimeout(checkUrlChange, 500);
+      setTimeout(() => {
+        checkUrlChange();
+      }, 500);
     });
   }
+  
+  // DOMContentLoaded 시에도 확인 (더 빠른 감지)
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      setTimeout(() => {
+        checkUrlChange();
+      }, 300);
+    });
+  }
+  
+  // 초기 URL 체크 (페이지 로드 시 이전 URL과 비교)
+  // 녹화 중이면 storage에서 이전 URL 가져와서 비교
+  chrome.storage.local.get(['recording', 'lastRecordedUrl'], (result) => {
+    if (result.recording) {
+      const currentUrl = window.location.href;
+      if (result.lastRecordedUrl && result.lastRecordedUrl !== currentUrl) {
+        // 이전 URL이 있고 현재 URL과 다르면 navigate 이벤트 기록
+        lastUrl = result.lastRecordedUrl;
+        lastTitle = '';
+        
+        // URL 변경 이벤트 기록
+        setTimeout(() => {
+          checkUrlChange();
+        }, 200);
+      } else {
+        // 이전 URL이 없거나 같으면 현재 URL로 초기화
+        lastUrl = currentUrl;
+        lastTitle = document.title;
+        
+        // storage에 현재 URL 저장
+        chrome.storage.local.set({ lastRecordedUrl: currentUrl });
+      }
+    }
+  });
 }
 
 export function getRecordingState() {
