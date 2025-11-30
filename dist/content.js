@@ -2588,8 +2588,32 @@
     chrome.runtime.sendMessage({ type: "SAVE_EVENT", event: eventRecord }, () => {
     });
   }
+  var currentSessionId = null;
+  function getCurrentSessionId() {
+    if (currentSessionId) {
+      return currentSessionId;
+    }
+    if (typeof window !== "undefined" && window.__ai_test_recorder_session_id__) {
+      return window.__ai_test_recorder_session_id__;
+    }
+    try {
+      chrome.storage.local.get(["recordingData"], (result) => {
+        if (result.recordingData && result.recordingData.sessionId) {
+          currentSessionId = result.recordingData.sessionId;
+        }
+      });
+    } catch (err) {
+    }
+    return currentSessionId;
+  }
   function broadcastRecordedEvent(eventRecord) {
     chrome.runtime.sendMessage({ type: "EVENT_RECORDED", event: eventRecord }, () => {
+    });
+    chrome.runtime.sendMessage({
+      type: "DOM_EVENT",
+      event: eventRecord,
+      sessionId: getCurrentSessionId()
+    }, () => {
     });
   }
   function buildClientRect(target) {
@@ -2978,6 +3002,9 @@
           }
           case "RECORDING_START": {
             startRecording({ resetEvents: true });
+            if (message.sessionId) {
+              setCurrentSessionId(message.sessionId);
+            }
             sendResponse({ ok: true });
             return;
           }

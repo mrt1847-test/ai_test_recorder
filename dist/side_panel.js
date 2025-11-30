@@ -2953,6 +2953,16 @@ function addAssertionAfterStep(stepIndex, assertionType, path, value) {
       });
       // allEvents가 syncTimelineFromEvents에서 업데이트되므로 normalized를 사용
       updateCode({ preloadedEvents: normalized });
+      
+      // Electron으로 실시간 전송
+      chrome.storage.local.get(['recordingData'], (result) => {
+        const sessionId = result.recordingData?.sessionId || null;
+        chrome.runtime.sendMessage({ 
+          type: 'DOM_EVENT', 
+          event: eventRecord,
+          sessionId: sessionId
+        }, () => {});
+      });
     });
   });
 }
@@ -4873,10 +4883,23 @@ function addVerifyAction(verifyType, path, value) {
     chrome.runtime.sendMessage({ type: 'SAVE_EVENT', event: eventRecord }, () => {
       chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
         const events = (res && res.events) || [];
-        allEvents = events.map(normalizeEventRecord);
-        updateCode({ preloadedEvents: allEvents });
-        refreshTimeline();
+        const normalized = syncTimelineFromEvents(events, {
+          preserveSelection: false,
+          selectLast: false,
+          resetAiState: false
+        });
+        updateCode({ preloadedEvents: normalized });
       });
+    });
+    
+    // Electron으로 실시간 전송
+    chrome.storage.local.get(['recordingData'], (result) => {
+      const sessionId = result.recordingData?.sessionId || null;
+      chrome.runtime.sendMessage({ 
+        type: 'DOM_EVENT', 
+        event: eventRecord,
+        sessionId: sessionId
+      }, () => {});
     });
     
     if (verifyActionsContainer) {
@@ -4989,9 +5012,12 @@ function addWaitAction(waitType, timeValue, path) {
     chrome.runtime.sendMessage({ type: 'SAVE_EVENT', event: eventRecord }, () => {
       chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
         const events = (res && res.events) || [];
-        allEvents = events.map(normalizeEventRecord);
-        updateCode({ preloadedEvents: allEvents });
-        refreshTimeline();
+        const normalized = syncTimelineFromEvents(events, {
+          preserveSelection: false,
+          selectLast: false,
+          resetAiState: false
+        });
+        updateCode({ preloadedEvents: normalized });
       });
     });
     
@@ -5076,10 +5102,23 @@ function addInteractionAction(interactionType, path, value) {
     chrome.runtime.sendMessage({ type: 'SAVE_EVENT', event: eventRecord }, () => {
       chrome.runtime.sendMessage({type:'GET_EVENTS'}, (res) => {
         const events = (res && res.events) || [];
-        allEvents = events.map(normalizeEventRecord);
-        updateCode({ preloadedEvents: allEvents });
-        refreshTimeline();
+        const normalized = syncTimelineFromEvents(events, {
+          preserveSelection: false,
+          selectLast: false,
+          resetAiState: false
+        });
+        updateCode({ preloadedEvents: normalized });
       });
+    });
+    
+    // Electron으로 실시간 전송
+    chrome.storage.local.get(['recordingData'], (result) => {
+      const sessionId = result.recordingData?.sessionId || null;
+      chrome.runtime.sendMessage({ 
+        type: 'DOM_EVENT', 
+        event: eventRecord,
+        sessionId: sessionId
+      }, () => {});
     });
     
     if (interactionActionsContainer) {
@@ -6018,11 +6057,51 @@ function updateCode(options = {}) {
       const code = generateCode(normalizedEvents, manualActions, selectedFramework, selectedLanguage);
       setCodeText(code);
       updateSelectionCodePreview();
+      
+      // Electron에 코드 변경 알림 (선택사항 - 너무 빈번할 수 있으므로 debounce 고려)
+      chrome.storage.local.get(['recordingData'], (result) => {
+        const sessionId = result.recordingData?.sessionId || null;
+        if (sessionId) {
+          chrome.runtime.sendMessage({
+            type: 'CODE_UPDATED',
+            code: code,
+            eventsCount: normalizedEvents.length,
+            framework: selectedFramework,
+            language: selectedLanguage,
+            sessionId: sessionId
+          }, () => {});
+        }
+      });
     });
   };
 
   if (Array.isArray(preloadedEvents)) {
-    handleEvents(preloadedEvents);
+    // preloadedEvents를 사용할 때도 allEvents 업데이트 및 타임라인 동기화
+    const normalized = syncTimelineFromEvents(preloadedEvents, {
+      preserveSelection: false,
+      selectLast: false,
+      resetAiState: false
+    });
+    loadManualActions(() => {
+      const code = generateCode(normalized, manualActions, selectedFramework, selectedLanguage);
+      setCodeText(code);
+      updateSelectionCodePreview();
+      
+      // Electron에 코드 변경 알림
+      chrome.storage.local.get(['recordingData'], (result) => {
+        const sessionId = result.recordingData?.sessionId || null;
+        if (sessionId) {
+          chrome.runtime.sendMessage({
+            type: 'CODE_UPDATED',
+            code: code,
+            eventsCount: normalized.length,
+            framework: selectedFramework,
+            language: selectedLanguage,
+            sessionId: sessionId
+          }, () => {});
+        }
+      });
+    });
     return;
   }
 
