@@ -2989,6 +2989,42 @@
         });
         window.testArchitectParams = params;
         console.log("[Content Script] URL \uD30C\uB77C\uBBF8\uD130 \uC800\uC7A5:", params);
+        if (tcId && projectId && sessionId) {
+          console.log("[Content Script] \u2705 \uD544\uC218 \uD30C\uB77C\uBBF8\uD130 \uAC10\uC9C0, \uC0AC\uC774\uB4DC \uD328\uB110 \uC5F4\uAE30 \uC694\uCCAD:", params);
+          setTimeout(() => {
+            chrome.runtime.sendMessage({
+              type: "OPEN_RECORDING_PANEL",
+              tcId,
+              projectId,
+              sessionId,
+              url: window.location.href
+            }, (response) => {
+              if (chrome.runtime.lastError) {
+                console.error("[Content Script] \u274C \uC0AC\uC774\uB4DC \uD328\uB110 \uC5F4\uAE30 \uC694\uCCAD \uC2E4\uD328:", chrome.runtime.lastError);
+                setTimeout(() => {
+                  console.log("[Content Script] \u{1F504} \uC0AC\uC774\uB4DC \uD328\uB110 \uC5F4\uAE30 \uC7AC\uC2DC\uB3C4");
+                  chrome.runtime.sendMessage({
+                    type: "OPEN_RECORDING_PANEL",
+                    tcId,
+                    projectId,
+                    sessionId,
+                    url: window.location.href
+                  }, (retryResponse) => {
+                    if (chrome.runtime.lastError) {
+                      console.error("[Content Script] \u274C \uC7AC\uC2DC\uB3C4\uB3C4 \uC2E4\uD328:", chrome.runtime.lastError);
+                    } else {
+                      console.log("[Content Script] \u2705 \uC7AC\uC2DC\uB3C4 \uC131\uACF5:", retryResponse);
+                    }
+                  });
+                }, 1e3);
+              } else {
+                console.log("[Content Script] \u2705 \uC0AC\uC774\uB4DC \uD328\uB110 \uC5F4\uAE30 \uC694\uCCAD \uC131\uACF5:", response);
+              }
+            });
+          }, 500);
+        } else {
+          console.log("[Content Script] \u26A0\uFE0F \uD544\uC218 \uD30C\uB77C\uBBF8\uD130 \uBD80\uC871:", { tcId: !!tcId, projectId: !!projectId, sessionId: !!sessionId });
+        }
       }
       if (window.testArchitectParams && typeof window.testArchitectParams === "object") {
         const params = window.testArchitectParams;
@@ -3006,16 +3042,33 @@
       window.addEventListener("testarchitect-params-ready", (event) => {
         const params = event.detail || {};
         if (params.tcId || params.projectId) {
+          const savedParams = {
+            tcId: params.tcId || null,
+            projectId: params.projectId || null,
+            sessionId: params.sessionId || null,
+            url: window.location.href,
+            timestamp: Date.now()
+          };
           chrome.storage.local.set({
-            testArchitectParams: {
-              tcId: params.tcId || null,
-              projectId: params.projectId || null,
-              sessionId: params.sessionId || null,
-              url: window.location.href,
-              timestamp: Date.now()
-            }
+            testArchitectParams: savedParams
           });
-          console.log("[Content Script] \uCEE4\uC2A4\uD140 \uC774\uBCA4\uD2B8\uC5D0\uC11C \uD30C\uB77C\uBBF8\uD130 \uC800\uC7A5:", params);
+          console.log("[Content Script] \uCEE4\uC2A4\uD140 \uC774\uBCA4\uD2B8\uC5D0\uC11C \uD30C\uB77C\uBBF8\uD130 \uC800\uC7A5:", savedParams);
+          if (params.tcId && params.projectId && params.sessionId) {
+            console.log("[Content Script] \uCEE4\uC2A4\uD140 \uC774\uBCA4\uD2B8\uC5D0\uC11C \uC0AC\uC774\uB4DC \uD328\uB110 \uC5F4\uAE30 \uC694\uCCAD:", savedParams);
+            chrome.runtime.sendMessage({
+              type: "OPEN_RECORDING_PANEL",
+              tcId: params.tcId,
+              projectId: params.projectId,
+              sessionId: params.sessionId,
+              url: window.location.href
+            }, (response) => {
+              if (chrome.runtime.lastError) {
+                console.error("[Content Script] \uC0AC\uC774\uB4DC \uD328\uB110 \uC5F4\uAE30 \uC694\uCCAD \uC2E4\uD328:", chrome.runtime.lastError);
+              } else {
+                console.log("[Content Script] \uC0AC\uC774\uB4DC \uD328\uB110 \uC5F4\uAE30 \uC694\uCCAD \uC131\uACF5:", response);
+              }
+            });
+          }
         }
       }, { once: false });
     } catch (error) {

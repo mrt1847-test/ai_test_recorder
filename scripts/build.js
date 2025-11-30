@@ -14,6 +14,16 @@ function ensureCleanDist() {
 }
 
 function copyStaticAssets() {
+  // side_panel.js가 소스에 없으면 popup.js를 복사해서 생성
+  const sidePanelSrc = resolve(projectRoot, 'side_panel.js');
+  if (!existsSync(sidePanelSrc)) {
+    const popupSrc = resolve(projectRoot, 'popup.js');
+    if (existsSync(popupSrc)) {
+      console.log(`[Build] side_panel.js가 없어서 popup.js를 복사하여 생성합니다.`);
+      copyFileSync(popupSrc, sidePanelSrc);
+    }
+  }
+
   const files = [
     'manifest.json',
     'background.js',
@@ -23,12 +33,20 @@ function copyStaticAssets() {
     'panel.js',
     'popup.html',
     'popup.js',
+    'side_panel.html',
+    'side_panel.js',
     'style.css'
   ];
 
   files.forEach((file) => {
     const src = resolve(projectRoot, file);
     const dest = resolve(distDir, file);
+    
+    if (!existsSync(src)) {
+      console.warn(`[Build] 경고: ${file} 파일을 찾을 수 없습니다.`);
+      return;
+    }
+    
     copyFileSync(src, dest);
   });
 

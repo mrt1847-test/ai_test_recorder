@@ -795,35 +795,62 @@ function handleWebSocketMessage(message) {
 
   switch (message.type) {
     case 'OPEN_POPUP':
-      // 팝업 열기
-      chrome.windows.create({
-        url: chrome.runtime.getURL('popup.html'),
-        type: 'popup',
-        width: 1220,
-        height: 850,
-        focused: true
-      }, (window) => {
-        if (chrome.runtime.lastError) {
-          console.error('[Background] 창 열기 실패:', chrome.runtime.lastError);
-          sendWebSocketMessage({
-            type: 'OPEN_POPUP_RESPONSE',
-            success: false,
-            error: chrome.runtime.lastError.message
-          });
-        } else {
-          console.log('[Background] 새 창이 열렸습니다. Window ID:', window.id);
-          sendWebSocketMessage({
-            type: 'OPEN_POPUP_RESPONSE',
-            success: true,
-            windowId: window.id
+      // 사이드 패널 열기
+      (async () => {
+        try {
+          // 현재 활성 탭 가져오기
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tab && tab.id) {
+            await chrome.sidePanel.open({ tabId: tab.id });
+            console.log('[Background] 사이드 패널 열기 성공');
+            sendWebSocketMessage({
+              type: 'OPEN_POPUP_RESPONSE',
+              success: true,
+              message: '사이드 패널이 열렸습니다'
+            });
+          } else {
+            throw new Error('활성 탭을 찾을 수 없습니다');
+          }
+        } catch (error) {
+          console.error('[Background] 사이드 패널 열기 실패:', error);
+          // 실패 시 기존 방식으로 폴백
+          chrome.windows.create({
+            url: chrome.runtime.getURL('popup.html'),
+            type: 'popup',
+            width: 1220,
+            height: 850,
+            focused: true
+          }, (window) => {
+            if (chrome.runtime.lastError) {
+              sendWebSocketMessage({
+                type: 'OPEN_POPUP_RESPONSE',
+                success: false,
+                error: chrome.runtime.lastError.message
+              });
+            } else {
+              sendWebSocketMessage({
+                type: 'OPEN_POPUP_RESPONSE',
+                success: true,
+                windowId: window.id
+              });
+            }
           });
         }
-      });
+      })();
+      break;
+
+    case 'start-recording':
+      // Electron에서 녹화 시작 명령 수신
+      handleStartRecording(message);
+      break;
+
+    case 'stop-recording':
+      // Electron에서 녹화 중지 명령 수신
+      handleStopRecording();
       break;
 
     case 'START_RECORDING':
-      // 녹화 시작 (필요한 경우)
-      // 현재는 popup에서 처리하므로 여기서는 알림만
+      // 기존 호환성을 위한 처리 (deprecated)
       sendWebSocketMessage({
         type: 'START_RECORDING_RESPONSE',
         message: '녹화는 팝업에서 시작해주세요'
@@ -860,15 +887,23 @@ chrome.runtime.onStartup.addListener(() => {
 // Background Script가 활성화될 때 WebSocket 연결
 initWebSocket();
 
-// 확장 프로그램 아이콘 클릭 시 새 창 열기
-chrome.action.onClicked.addListener(() => {
-  chrome.windows.create({
-    url: chrome.runtime.getURL('popup.html'),
-    type: 'popup',
-    width: 1220,
-    height: 850,
-    focused: true
-  });
+// 확장 프로그램 아이콘 클릭 시 사이드 패널 열기
+chrome.action.onClicked.addListener(async (tab) => {
+  try {
+    // 사이드 패널 열기 (현재 탭의 사이드 패널)
+    await chrome.sidePanel.open({ tabId: tab.id });
+    console.log('[Background] 사이드 패널 열기 성공');
+  } catch (error) {
+    console.error('[Background] 사이드 패널 열기 실패:', error);
+    // 실패 시 기존 방식으로 폴백 (팝업 창)
+    chrome.windows.create({
+      url: chrome.runtime.getURL('popup.html'),
+      type: 'popup',
+      width: 1220,
+      height: 850,
+      focused: true
+    });
+  }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -879,7 +914,100 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
   injectedTabs.delete(removedTabId);
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // CDP 모드로 열린 Chrome 감지: URL에 tcId, projectId, sessionId 파라미터가 있는지 확인
+  if (changeInfo.status === 'complete' && tab && tab.url) {
+    try {
+      const url = new URL(tab.url);
+      const tcId = url.searchParams.get('tcId');
+      const projectId = url.searchParams.get('projectId');
+      const sessionId = url.searchParams.get('sessionId');
+      
+      // CDP 모드로 열린 경우 (필수 파라미터가 모두 있는 경우)
+      if (tcId && projectId && sessionId) {
+        console.log('[Background] 🔍 CDP 모드로 열린 Chrome 감지:', { tcId, projectId, sessionId, url: tab.url });
+        
+        // 사이드 패널 자동 열기
+        (async () => {
+          try {
+            // 녹화 데이터 저장
+            const recordingData = {
+              tcId,
+              projectId,
+              sessionId,
+              url: tab.url,
+              timestamp: Date.now()
+            };
+            
+            await chrome.storage.local.set({
+              recordingData: recordingData,
+              testArchitectParams: {
+                tcId,
+                projectId,
+                sessionId,
+                url: tab.url,
+                timestamp: Date.now()
+              }
+            });
+            
+            // 사이드 패널 열기
+            await chrome.sidePanel.open({ tabId: tab.id });
+            console.log('[Background] ✅ CDP 모드 감지: 사이드 패널 자동 열기 성공');
+            
+            // Content Script에 녹화 시작 메시지 전송 (약간의 지연 후)
+            setTimeout(() => {
+              chrome.tabs.sendMessage(tab.id, {
+                type: 'RECORDING_START',
+                tcId,
+                projectId,
+                sessionId,
+                url: tab.url,
+                timestamp: Date.now()
+              }, (response) => {
+                if (chrome.runtime.lastError) {
+                  console.warn('[Background] ⚠️ Content Script에 메시지 전송 실패, 재시도:', chrome.runtime.lastError);
+                  // Content Script 주입 시도
+                  chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    files: ['content.js']
+                  }, () => {
+                    if (!chrome.runtime.lastError) {
+                      injectedTabs.add(tab.id);
+                      // 다시 메시지 전송
+                      chrome.tabs.sendMessage(tab.id, {
+                        type: 'RECORDING_START',
+                        tcId,
+                        projectId,
+                        sessionId,
+                        url: tab.url,
+                        timestamp: Date.now()
+                      });
+                    }
+                  });
+                } else {
+                  console.log('[Background] ✅ Content Script에 녹화 시작 메시지 전송 성공');
+                }
+              });
+            }, 500); // 500ms 지연
+            
+            // Electron에 녹화 시작 알림
+            sendWebSocketMessage({
+              type: 'recording-start',
+              tcId,
+              projectId,
+              sessionId,
+              timestamp: Date.now()
+            });
+          } catch (error) {
+            console.error('[Background] ❌ CDP 모드 감지 후 처리 실패:', error);
+          }
+        })();
+      }
+    } catch (error) {
+      // URL 파싱 실패는 무시 (chrome:// 등의 특수 URL일 수 있음)
+    }
+  }
+  
   // 우리 확장이 주입해 둔 탭만 다시 주입을 시도한다.
   if (!injectedTabs.has(tabId)) return;
   // 로딩 상태로 전환될 때만 content.js를 다시 넣는다.
@@ -954,6 +1082,68 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg && msg.type === 'OPEN_RECORDING_PANEL') {
+    handleOpenRecordingPanel(msg, sender, sendResponse);
+    return true; // 비동기 응답을 위해 true 반환
+  }
+
+  // Content Script로부터 DOM 이벤트를 Electron으로 전달
+  if (msg && msg.type === 'DOM_EVENT') {
+    sendWebSocketMessage({
+      type: 'dom-event',
+      event: msg.event,
+      sessionId: msg.sessionId,
+      timestamp: Date.now()
+    });
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  // 요소 하이라이트 정보 전달
+  if (msg && msg.type === 'ELEMENT_HOVER') {
+    sendWebSocketMessage({
+      type: 'element-hover',
+      element: msg.element,
+      selectors: msg.selectors,
+      timestamp: Date.now()
+    });
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  // 요소 하이라이트 해제
+  if (msg && msg.type === 'ELEMENT_HOVER_CLEAR') {
+    sendWebSocketMessage({
+      type: 'element-hover-clear',
+      timestamp: Date.now()
+    });
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  // 녹화 완료 전달
+  if (msg && msg.type === 'RECORDING_COMPLETE') {
+    sendWebSocketMessage({
+      type: 'recording-complete',
+      data: msg.data,
+      timestamp: Date.now()
+    });
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  // Content Script 연결 확인
+  if (msg && msg.type === 'CONTENT_SCRIPT_CONNECTED') {
+    sendWebSocketMessage({
+      type: 'content-script-connected',
+      url: msg.url,
+      tabId: sender?.tab?.id || null,
+      timestamp: Date.now()
+    });
+    sendResponse({ ok: true });
+    return true;
+  }
+
   return false;
 });
 
@@ -970,46 +1160,66 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
     // 즉시 응답 반환 (sendResponse는 리스너가 종료되기 전에 호출되어야 함)
     sendResponse(response);
     
-    // chrome.tabs.create()는 popup.html을 직접 열 수 없으므로
-    // chrome.windows.create()를 사용하여 새 창으로 열기
-    chrome.windows.create({
-      url: chrome.runtime.getURL('popup.html'),
-      type: 'popup',
-      width: 1220,
-      height: 850,
-      focused: true
-    }, (window) => {
-      if (chrome.runtime.lastError) {
-        console.error('[Background] 창 열기 실패:', chrome.runtime.lastError);
-        return;
-      }
-      
-      console.log('[Background] 새 창이 열렸습니다. Window ID:', window.id);
-      
-      // content script 자동 주입 (활성 탭이 있는 경우)
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs && tabs.length > 0) {
-          const activeTab = tabs[0];
-          // chrome-extension:// 또는 chrome:// 페이지는 제외
-          if (activeTab.url && 
-              !activeTab.url.startsWith('chrome://') && 
-              !activeTab.url.startsWith('chrome-extension://') &&
-              !activeTab.url.startsWith('edge://')) {
-            chrome.scripting.executeScript({
-              target: { tabId: activeTab.id },
-              files: ['content.js']
-            }, () => {
-              if (chrome.runtime.lastError) {
-                console.warn('[Background] Content script 주입 실패:', chrome.runtime.lastError);
-              } else {
-                injectedTabs.add(activeTab.id);
-                console.log('[Background] Content script 주입 성공:', activeTab.id);
-              }
-            });
+    // 사이드 패널 열기 시도
+    (async () => {
+      try {
+        // sender의 탭 ID가 있으면 사용, 없으면 활성 탭 사용
+        const tabId = sender?.tab?.id;
+        if (tabId) {
+          await chrome.sidePanel.open({ tabId });
+          console.log('[Background] 사이드 패널 열기 성공 (외부 요청)');
+        } else {
+          // 탭 ID가 없으면 활성 탭 찾기
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tab && tab.id) {
+            await chrome.sidePanel.open({ tabId: tab.id });
+            console.log('[Background] 사이드 패널 열기 성공 (활성 탭 사용)');
+          } else {
+            throw new Error('사이드 패널을 열 탭을 찾을 수 없습니다');
           }
         }
-      });
-    });
+      } catch (error) {
+        console.error('[Background] 사이드 패널 열기 실패, 팝업 창으로 폴백:', error);
+        // 실패 시 기존 방식으로 폴백
+        chrome.windows.create({
+          url: chrome.runtime.getURL('popup.html'),
+          type: 'popup',
+          width: 1220,
+          height: 850,
+          focused: true
+        }, (window) => {
+          if (chrome.runtime.lastError) {
+            console.error('[Background] 창 열기 실패:', chrome.runtime.lastError);
+            return;
+          }
+          console.log('[Background] 새 창이 열렸습니다. Window ID:', window.id);
+          
+          // content script 자동 주입 (활성 탭이 있는 경우)
+          chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            if (tabs && tabs.length > 0) {
+              const activeTab = tabs[0];
+              // chrome-extension:// 또는 chrome:// 페이지는 제외
+              if (activeTab.url && 
+                  !activeTab.url.startsWith('chrome://') && 
+                  !activeTab.url.startsWith('chrome-extension://') &&
+                  !activeTab.url.startsWith('edge://')) {
+                chrome.scripting.executeScript({
+                  target: { tabId: activeTab.id },
+                  files: ['content.js']
+                }, () => {
+                  if (chrome.runtime.lastError) {
+                    console.warn('[Background] Content script 주입 실패:', chrome.runtime.lastError);
+                  } else {
+                    injectedTabs.add(activeTab.id);
+                    console.log('[Background] Content script 주입 성공:', activeTab.id);
+                  }
+                });
+              }
+            }
+          });
+        });
+      }
+    })();
     
     return true; // 비동기 응답을 위해 true 반환
   }
@@ -1021,7 +1231,354 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
     return true;
   }
   
+  if (msg && msg.type === 'OPEN_SIDE_PANEL') {
+    // 외부에서 직접 사이드 패널 열기 요청 (CDP나 자동화 툴에서 호출)
+    const params = msg.params || {};
+    handleOpenRecordingPanel({
+      tcId: params.tcId || msg.tcId,
+      projectId: params.projectId || msg.projectId,
+      sessionId: params.sessionId || msg.sessionId,
+      url: params.url || msg.url
+    }, sender, sendResponse);
+    return true; // 비동기 응답을 위해 true 반환
+  }
+  
   console.warn('[Background] 알 수 없는 메시지 타입:', msg?.type);
   sendResponse({ ok: false, error: 'Unknown message type' });
   return false;
 });
+
+/**
+ * Electron에서 녹화 시작 명령 처리
+ * 문서 가이드에 따라 구현: 녹화 데이터 저장, 사이드 패널 열기, Content Script에 메시지 전송
+ */
+async function handleStartRecording(message) {
+  try {
+    const { tcId, projectId, sessionId, url } = message;
+    
+    console.log('[Background] 📹 녹화 시작 명령 수신:', { tcId, projectId, sessionId, url });
+    
+    // 필수 파라미터 확인
+    if (!tcId || !projectId || !sessionId) {
+      console.error('[Background] ❌ 필수 파라미터 누락:', { tcId, projectId, sessionId });
+      sendWebSocketMessage({
+        type: 'error',
+        message: '필수 파라미터가 누락되었습니다 (tcId, projectId, sessionId 필요)',
+        timestamp: Date.now()
+      });
+      return;
+    }
+    
+    // 녹화 데이터 저장
+    const recordingData = {
+      tcId,
+      projectId,
+      sessionId,
+      url: url || '',
+      timestamp: Date.now()
+    };
+    
+    await chrome.storage.local.set({
+      recordingData: recordingData,
+      testArchitectParams: {
+        tcId,
+        projectId,
+        sessionId,
+        url: url || '',
+        timestamp: Date.now()
+      }
+    });
+    
+    console.log('[Background] ✅ 녹화 데이터 저장 완료:', recordingData);
+    
+    // 현재 활성 탭 찾기
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tabs && tabs.length > 0 && tabs[0].id) {
+      const activeTab = tabs[0];
+      
+      // Side Panel 열기
+      try {
+        await chrome.sidePanel.open({ tabId: activeTab.id });
+        console.log('[Background] ✅ 사이드 패널 열기 성공');
+      } catch (error) {
+        console.error('[Background] ⚠️ 사이드 패널 열기 실패:', error);
+        // 실패해도 계속 진행
+      }
+      
+      // Content Script에 녹화 시작 메시지 전송
+      chrome.tabs.sendMessage(activeTab.id, {
+        type: 'RECORDING_START',
+        tcId,
+        projectId,
+        sessionId,
+        url: url || activeTab.url || '',
+        timestamp: Date.now()
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.warn('[Background] ⚠️ Content Script에 메시지 전송 실패:', chrome.runtime.lastError);
+          // Content Script가 아직 로드되지 않았을 수 있음
+          // 탭 업데이트 리스너에서 재시도하거나, content script 주입 필요
+        } else {
+          console.log('[Background] ✅ Content Script에 녹화 시작 메시지 전송 성공');
+        }
+      });
+      
+      // 모든 탭의 Content Script에 브로드캐스트 (선택적)
+      chrome.tabs.query({}, (allTabs) => {
+        allTabs.forEach((tab) => {
+          // chrome://, chrome-extension:// 페이지는 제외
+          if (tab.url && 
+              !tab.url.startsWith('chrome://') && 
+              !tab.url.startsWith('chrome-extension://') &&
+              !tab.url.startsWith('edge://') &&
+              tab.id !== activeTab.id) { // 활성 탭은 이미 처리했으므로 제외
+            chrome.tabs.sendMessage(tab.id, {
+              type: 'RECORDING_START',
+              tcId,
+              projectId,
+              sessionId,
+              timestamp: Date.now()
+            }, () => {
+              // 에러는 무시 (Content Script가 없는 탭일 수 있음)
+            });
+          }
+        });
+      });
+    }
+    
+    // Electron에 녹화 시작 알림
+    sendWebSocketMessage({
+      type: 'recording-start',
+      tcId,
+      projectId,
+      sessionId,
+      timestamp: Date.now()
+    });
+    
+    console.log('[Background] ✅ 녹화 시작 처리 완료');
+  } catch (error) {
+    console.error('[Background] ❌ 녹화 시작 실패:', error);
+    sendWebSocketMessage({
+      type: 'error',
+      message: `녹화 시작 실패: ${error.message}`,
+      timestamp: Date.now()
+    });
+  }
+}
+
+/**
+ * Electron에서 녹화 중지 명령 처리
+ * 문서 가이드에 따라 구현: 모든 탭의 Content Script에 메시지 전송, Electron에 알림
+ */
+async function handleStopRecording() {
+  try {
+    console.log('[Background] 📹 녹화 중지 명령 수신');
+    
+    // 모든 탭의 Content Script에 녹화 중지 메시지 전송
+    chrome.tabs.query({}, (allTabs) => {
+      allTabs.forEach((tab) => {
+        if (tab.url && 
+            !tab.url.startsWith('chrome://') && 
+            !tab.url.startsWith('chrome-extension://') &&
+            !tab.url.startsWith('edge://')) {
+          chrome.tabs.sendMessage(tab.id, {
+            type: 'RECORDING_STOP',
+            timestamp: Date.now()
+          }, () => {
+            // 에러는 무시 (Content Script가 없는 탭일 수 있음)
+          });
+        }
+      });
+    });
+    
+    // Electron에 녹화 중지 알림
+    sendWebSocketMessage({
+      type: 'recording-stop',
+      timestamp: Date.now()
+    });
+    
+    console.log('[Background] ✅ 녹화 중지 처리 완료');
+  } catch (error) {
+    console.error('[Background] ❌ 녹화 중지 실패:', error);
+    sendWebSocketMessage({
+      type: 'error',
+      message: `녹화 중지 실패: ${error.message}`,
+      timestamp: Date.now()
+    });
+  }
+}
+
+/**
+ * 사이드 패널 열기 핸들러
+ * Content Script로부터 URL 파라미터를 감지하여 사이드 패널을 자동으로 엽니다.
+ */
+async function handleOpenRecordingPanel(message, sender, sendResponse) {
+  try {
+    const { tcId, projectId, sessionId, url } = message;
+    
+    console.log('[Background] 📨 사이드 패널 열기 요청 수신:', { tcId, projectId, sessionId, url, sender: sender?.tab?.id });
+    
+    // 필수 파라미터 확인
+    if (!tcId || !projectId || !sessionId) {
+      const errorMsg = `필수 파라미터가 누락되었습니다. (tcId: ${!!tcId}, projectId: ${!!projectId}, sessionId: ${!!sessionId})`;
+      console.error('[Background] ❌', errorMsg);
+      throw new Error(errorMsg);
+    }
+    
+    // 현재 활성 탭 찾기 (sender의 탭 ID가 있으면 사용, 없으면 활성 탭 사용)
+    let targetTab = null;
+    
+    if (sender && sender.tab && sender.tab.id) {
+      // Content Script에서 온 메시지인 경우 sender.tab.id 사용
+      try {
+        targetTab = await chrome.tabs.get(sender.tab.id);
+        console.log('[Background] ✅ Content Script 탭 사용:', targetTab.id, 'URL:', targetTab.url);
+      } catch (err) {
+        console.warn('[Background] ⚠️ sender.tab.id로 탭 조회 실패:', err);
+        targetTab = null;
+      }
+    }
+    
+    // sender.tab이 없거나 조회 실패 시 활성 탭 찾기
+    if (!targetTab) {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tabs && tabs.length > 0) {
+        targetTab = tabs[0];
+        console.log('[Background] ✅ 활성 탭 사용:', targetTab.id, 'URL:', targetTab.url);
+      }
+    }
+    
+    if (!targetTab || !targetTab.id) {
+      throw new Error('사이드 패널을 열 탭을 찾을 수 없습니다');
+    }
+    
+    // 녹화 데이터를 Storage에 저장 (Side Panel에서 사용)
+    const recordingData = {
+      tcId: tcId,
+      projectId: projectId,
+      sessionId: sessionId,
+      url: url || targetTab.url || '',
+      timestamp: Date.now()
+    };
+    
+    await chrome.storage.local.set({
+      recordingData: recordingData,
+      testArchitectParams: {
+        tcId: tcId,
+        projectId: projectId,
+        sessionId: sessionId,
+        url: url || targetTab.url || '',
+        timestamp: Date.now()
+      }
+    });
+    
+    console.log('[Background] ✅ 녹화 데이터 저장 완료:', recordingData);
+    
+    // Side Panel 열기 시도 (여러 방법 시도)
+    let panelOpened = false;
+    let lastError = null;
+    
+    // Chrome sidePanel API 지원 여부 확인
+    if (!chrome.sidePanel || typeof chrome.sidePanel.open !== 'function') {
+      console.error('[Background] ❌ chrome.sidePanel API를 사용할 수 없습니다. Chrome 114+ 버전이 필요합니다.');
+      throw new Error('Side Panel API를 지원하지 않는 Chrome 버전입니다. Chrome 114 이상이 필요합니다.');
+    }
+    
+    console.log('[Background] 🔍 사이드 패널 열기 시도 시작, targetTab:', {
+      id: targetTab.id,
+      windowId: targetTab.windowId,
+      url: targetTab.url
+    });
+    
+    // 방법 1: windowId로 열기 (권장 방법)
+    if (targetTab.windowId) {
+      try {
+        console.log('[Background] 🔄 방법 1: windowId로 사이드 패널 열기 시도:', targetTab.windowId);
+        await chrome.sidePanel.open({ windowId: targetTab.windowId });
+        console.log('[Background] ✅ 사이드 패널 열기 성공 (windowId:', targetTab.windowId, ')');
+        panelOpened = true;
+      } catch (windowError) {
+        lastError = windowError;
+        console.warn('[Background] ⚠️ 방법 1 실패:', windowError?.message || windowError);
+      }
+    }
+    
+    // 방법 2: tabId로 열기 (방법 1 실패 시)
+    if (!panelOpened && targetTab.id) {
+      try {
+        console.log('[Background] 🔄 방법 2: tabId로 사이드 패널 열기 시도:', targetTab.id);
+        await chrome.sidePanel.open({ tabId: targetTab.id });
+        console.log('[Background] ✅ 사이드 패널 열기 성공 (tabId:', targetTab.id, ')');
+        panelOpened = true;
+      } catch (tabError) {
+        lastError = tabError;
+        console.warn('[Background] ⚠️ 방법 2 실패:', tabError?.message || tabError);
+      }
+    }
+    
+    // 방법 3: 현재 창의 활성 탭으로 열기
+    if (!panelOpened) {
+      try {
+        console.log('[Background] 🔄 방법 3: 현재 창의 활성 탭으로 사이드 패널 열기 시도');
+        const currentWindow = await chrome.windows.getCurrent();
+        if (currentWindow && currentWindow.id) {
+          await chrome.sidePanel.open({ windowId: currentWindow.id });
+          console.log('[Background] ✅ 사이드 패널 열기 성공 (현재 창, windowId:', currentWindow.id, ')');
+          panelOpened = true;
+        }
+      } catch (currentWindowError) {
+        lastError = currentWindowError;
+        console.warn('[Background] ⚠️ 방법 3 실패:', currentWindowError?.message || currentWindowError);
+      }
+    }
+    
+    // 방법 4: 모든 창에서 활성 탭 찾아서 열기
+    if (!panelOpened) {
+      try {
+        console.log('[Background] 🔄 방법 4: 모든 창에서 활성 탭 검색');
+        const allTabs = await chrome.tabs.query({ active: true });
+        if (allTabs && allTabs.length > 0) {
+          const activeTab = allTabs.find(t => 
+            t.url && 
+            !t.url.startsWith('chrome://') && 
+            !t.url.startsWith('chrome-extension://') &&
+            !t.url.startsWith('edge://')
+          );
+          
+          if (activeTab && activeTab.windowId) {
+            await chrome.sidePanel.open({ windowId: activeTab.windowId });
+            console.log('[Background] ✅ 사이드 패널 열기 성공 (전체 검색, windowId:', activeTab.windowId, ')');
+            panelOpened = true;
+          }
+        }
+      } catch (searchError) {
+        lastError = searchError;
+        console.warn('[Background] ⚠️ 방법 4 실패:', searchError?.message || searchError);
+      }
+    }
+    
+    if (!panelOpened) {
+      const errorMsg = `사이드 패널을 열 수 없습니다. 마지막 오류: ${lastError?.message || '알 수 없는 오류'}`;
+      console.error('[Background] ❌', errorMsg);
+      console.error('[Background] 시도한 정보:', {
+        targetTabId: targetTab.id,
+        targetTabWindowId: targetTab.windowId,
+        targetTabUrl: targetTab.url
+      });
+      throw new Error(errorMsg);
+    }
+    
+    sendResponse({
+      success: true,
+      message: '사이드 패널이 열렸습니다',
+      recordingData: recordingData
+    });
+    
+  } catch (error) {
+    console.error('[Background] ❌ 사이드 패널 열기 실패:', error);
+    sendResponse({
+      success: false,
+      error: error.message || '알 수 없는 오류가 발생했습니다'
+    });
+  }
+}

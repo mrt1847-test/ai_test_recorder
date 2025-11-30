@@ -41,6 +41,47 @@ function extractAndSaveUrlParams() {
       window.testArchitectParams = params;
       
       console.log('[Content Script] URL 파라미터 저장:', params);
+      
+      // 필수 파라미터(tcId, projectId, sessionId)가 모두 있으면 사이드 패널 자동 열기 요청
+      if (tcId && projectId && sessionId) {
+        console.log('[Content Script] ✅ 필수 파라미터 감지, 사이드 패널 열기 요청:', params);
+        
+        // 약간의 지연을 두어 페이지가 완전히 로드된 후 실행
+        setTimeout(() => {
+          chrome.runtime.sendMessage({
+            type: 'OPEN_RECORDING_PANEL',
+            tcId: tcId,
+            projectId: projectId,
+            sessionId: sessionId,
+            url: window.location.href
+          }, (response) => {
+            if (chrome.runtime.lastError) {
+              console.error('[Content Script] ❌ 사이드 패널 열기 요청 실패:', chrome.runtime.lastError);
+              // 재시도 (1초 후)
+              setTimeout(() => {
+                console.log('[Content Script] 🔄 사이드 패널 열기 재시도');
+                chrome.runtime.sendMessage({
+                  type: 'OPEN_RECORDING_PANEL',
+                  tcId: tcId,
+                  projectId: projectId,
+                  sessionId: sessionId,
+                  url: window.location.href
+                }, (retryResponse) => {
+                  if (chrome.runtime.lastError) {
+                    console.error('[Content Script] ❌ 재시도도 실패:', chrome.runtime.lastError);
+                  } else {
+                    console.log('[Content Script] ✅ 재시도 성공:', retryResponse);
+                  }
+                });
+              }, 1000);
+            } else {
+              console.log('[Content Script] ✅ 사이드 패널 열기 요청 성공:', response);
+            }
+          });
+        }, 500);
+      } else {
+        console.log('[Content Script] ⚠️ 필수 파라미터 부족:', { tcId: !!tcId, projectId: !!projectId, sessionId: !!sessionId });
+      }
     }
     
     // 전역 변수 확인 (자동화 툴에서 설정한 경우)
@@ -62,16 +103,36 @@ function extractAndSaveUrlParams() {
     window.addEventListener('testarchitect-params-ready', (event) => {
       const params = event.detail || {};
       if (params.tcId || params.projectId) {
+        const savedParams = {
+          tcId: params.tcId || null,
+          projectId: params.projectId || null,
+          sessionId: params.sessionId || null,
+          url: window.location.href,
+          timestamp: Date.now()
+        };
+        
         chrome.storage.local.set({
-          testArchitectParams: {
-            tcId: params.tcId || null,
-            projectId: params.projectId || null,
-            sessionId: params.sessionId || null,
-            url: window.location.href,
-            timestamp: Date.now()
-          }
+          testArchitectParams: savedParams
         });
-        console.log('[Content Script] 커스텀 이벤트에서 파라미터 저장:', params);
+        console.log('[Content Script] 커스텀 이벤트에서 파라미터 저장:', savedParams);
+        
+        // 필수 파라미터가 모두 있으면 사이드 패널 자동 열기 요청
+        if (params.tcId && params.projectId && params.sessionId) {
+          console.log('[Content Script] 커스텀 이벤트에서 사이드 패널 열기 요청:', savedParams);
+          chrome.runtime.sendMessage({
+            type: 'OPEN_RECORDING_PANEL',
+            tcId: params.tcId,
+            projectId: params.projectId,
+            sessionId: params.sessionId,
+            url: window.location.href
+          }, (response) => {
+            if (chrome.runtime.lastError) {
+              console.error('[Content Script] 사이드 패널 열기 요청 실패:', chrome.runtime.lastError);
+            } else {
+              console.log('[Content Script] 사이드 패널 열기 요청 성공:', response);
+            }
+          });
+        }
       }
     }, { once: false });
     
