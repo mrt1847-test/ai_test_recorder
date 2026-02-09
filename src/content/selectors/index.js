@@ -68,6 +68,20 @@ const ATTRIBUTE_PRIORITY = [
   { attr: 'type', type: 'type', score: 68, reason: 'type 속성', allowPartial: false }
 ];
 
+function isLikelyDynamicClass(value) {
+  if (!value) return true;
+  if (value.length <= 2) return true;
+  if (/[a-f0-9]{6,}/i.test(value)) return true;
+  if (/\d/.test(value) && value.length >= 6) return true;
+  if (/^(css|sc|jsx|ember|styled|chakra|mui|ant|el|ql|v|ng|tw)-/i.test(value)) return true;
+  return false;
+}
+
+function filterStableClasses(classList, limit) {
+  const stable = classList.filter((cls) => !isLikelyDynamicClass(cls));
+  return stable.slice(0, limit ?? stable.length);
+}
+
 /**
  * 단일 요소에서 속성 기반 셀렉터 후보를 생성한다.
  * 우선순위를 정의한 ATTRIBUTE_PRIORITY에 따라 처리한다.
@@ -119,7 +133,7 @@ function buildAttributeSelectors(element) {
  * 요소의 classList를 활용해 class 조합 기반 셀렉터를 만든다.
  */
 function generateClassSelectors(element) {
-  const classList = Array.from(element.classList || []).filter(Boolean);
+  const classList = filterStableClasses(Array.from(element.classList || []).filter(Boolean));
   if (classList.length === 0) return [];
 
   const escaped = classList.map((cls) => cssEscapeIdent(cls));
@@ -238,18 +252,19 @@ function tryBuildAncestorTextXPath(element, textValue, matchMode) {
   const textExpr = matchMode === 'contains'
     ? `contains(normalize-space(.), ${literal})`
     : `normalize-space(.) = ${literal}`;
-  const elementClassList = Array.from(element.classList || []).filter(Boolean);
+  const elementClassList = filterStableClasses(Array.from(element.classList || []).filter(Boolean), TEXT_PARENT_CLASS_LIMIT);
   if (elementClassList.length) {
     // 원본 요소의 클래스 목록을 활용해 XPath 후보를 만든다.
-    for (const cls of elementClassList.slice(0, TEXT_PARENT_CLASS_LIMIT)) {
-      const literalClass = escapeXPathLiteral(cls);
+    for (const cls of elementClassList) {
+      const literalClass = escapeXPathLiteral(` ${cls} `);
+      const classExpr = `contains(concat(" ", normalize-space(@class), " "), ${literalClass})`;
       const tagName = element.tagName ? element.tagName.toLowerCase() : '*';
       // 클래스와 텍스트 조합으로 구성 가능한 XPath 후보를 나열한다.
       const candidates = [
-        `//*[@class=${literalClass} and normalize-space(.) = ${literal}]`,
-        `//*[@class=${literalClass} and contains(normalize-space(.), ${literal})]`,
-        `//${tagName}[@class=${literalClass} and normalize-space(.) = ${literal}]`,
-        `//${tagName}[@class=${literalClass} and contains(normalize-space(.), ${literal})]`
+        `//*[${classExpr} and normalize-space(.) = ${literal}]`,
+        `//*[${classExpr} and contains(normalize-space(.), ${literal})]`,
+        `//${tagName}[${classExpr} and normalize-space(.) = ${literal}]`,
+        `//${tagName}[${classExpr} and contains(normalize-space(.), ${literal})]`
       ];
       for (const xpathExpr of candidates) {
         const selector = `xpath=${xpathExpr}`;
@@ -277,12 +292,13 @@ function tryBuildAncestorTextXPath(element, textValue, matchMode) {
       current = current.parentElement;
       continue;
     }
-    const classList = Array.from(current.classList || []).filter(Boolean);
+    const classList = filterStableClasses(Array.from(current.classList || []).filter(Boolean), TEXT_PARENT_CLASS_LIMIT);
     const tagName = current.tagName ? current.tagName.toLowerCase() : '*';
     if (classList.length > 0) {
-      for (const cls of classList.slice(0, TEXT_PARENT_CLASS_LIMIT)) {
-        const classLiteral = escapeXPathLiteral(cls);
-        const classXPath = `//*[@class=${classLiteral}]//*[${textExpr}]`;
+      for (const cls of classList) {
+        const classLiteral = escapeXPathLiteral(` ${cls} `);
+        const classExpr = `contains(concat(" ", normalize-space(@class), " "), ${classLiteral})`;
+        const classXPath = `//*[${classExpr}]//*[${textExpr}]`;
         const classSelector = `xpath=${classXPath}`;
         const classParsed = parseSelectorForMatching(classSelector, 'xpath');
         const classCount = countMatchesForSelector(classParsed, document, { matchMode });
@@ -294,7 +310,7 @@ function tryBuildAncestorTextXPath(element, textValue, matchMode) {
             reason: '상위 클래스 + 텍스트 조합'
           };
         }
-        const tagClassXPath = `//${tagName}[@class=${classLiteral}]//*[${textExpr}]`;
+        const tagClassXPath = `//${tagName}[${classExpr}]//*[${textExpr}]`;
         const tagClassSelector = `xpath=${tagClassXPath}`;
         const tagClassParsed = parseSelectorForMatching(tagClassSelector, 'xpath');
         const tagClassCount = countMatchesForSelector(tagClassParsed, document, { matchMode });
@@ -364,16 +380,16 @@ function tryBuildAncestorCssSelector(element, baseSelector, contextElement) {
       continue;
     }
     const ancestorSelectors = [];
-    // if (current.id) {
-    //   // 고유 id가 있으면 최우선으로 고려.
-    //   ancestorSelectors.push(`#${cssEscapeIdent(current.id)}`);
-    // }
-    const classList = Array.from(current.classList || []).filter(Boolean);
+    if (current.id) {
+      // 고유 id가 있으면 최우선으로 고려.
+      ancestorSelectors.push(`#${cssEscapeIdent(current.id)}`);
+    }
+    const classList = filterStableClasses(Array.from(current.classList || []).filter(Boolean), CSS_PARENT_CLASS_LIMIT);
     if (classList.length) {
       const combos = buildClassCombinationLists(classList, {
         limit: CSS_PARENT_COMBINATION_LIMIT,
         maxResults: CSS_PARENT_MAX_COMBINATIONS,
-        classLimit: CSS_PARENT_CLASS_LIMIT
+        classLimit: classList.length
       });
       combos.forEach((combo) => {
         const escaped = combo.map((cls) => cssEscapeIdent(cls));
@@ -621,7 +637,6 @@ function applyContextMatchCheck(candidate, parsed, options, ctx) {
 
 function clampDuplicateScore(candidate, options) {
   if (typeof candidate.score !== 'number') return;
-  candidate.score = Math.min(candidate.score, options.duplicateScore ?? 55);
   candidate.score = Math.min(candidate.score, options.duplicateScore ?? 60);
 }
 
@@ -791,6 +806,8 @@ function collectTextCandidates(element, registry) {
 
   const truncatedText = rawText.slice(0, 60);
   const escapedText = escapeAttributeValue(truncatedText);
+  const lengthPenalty = Math.min(12, Math.floor(truncatedText.length / 20) * 2);
+  const baseTextScore = DEFAULT_TEXT_SCORE - lengthPenalty;
   const textSelector = `text="${escapedText}"`;
   let textMatchCount = null;
 
@@ -817,7 +834,7 @@ function collectTextCandidates(element, registry) {
   registry.add({
     type: 'text',
     selector: textSelector,
-    score: DEFAULT_TEXT_SCORE,
+    score: baseTextScore,
     reason: reasonParts.filter(Boolean).join(' • '),
     textValue: truncatedText,
     matchMode: 'exact',
@@ -833,7 +850,7 @@ function collectTextCandidates(element, registry) {
     {
       type: 'text',
       selector: `text="${escapedText}"`,
-      score: DEFAULT_TEXT_SCORE - 3,
+      score: baseTextScore - 3,
       reason: '텍스트 조합',
       textValue: truncatedText
     },
@@ -914,6 +931,11 @@ function applyFragilityAdjustments(candidate) {
 
   if (inferredType === 'class' || inferredType === 'class-tag') {
     const classCount = (selector.match(/\./g) || []).length;
+    const classTokens = selector.split('.').slice(1).map((token) => token.split(/[:\[]/)[0]).filter(Boolean);
+    if (classTokens.some((token) => isLikelyDynamicClass(token))) {
+      penalty += 10;
+      flags.push('동적 class 패턴');
+    }
     if (classCount > 2) {
       // 클래스가 너무 많으면 유지보수가 어렵기에 페널티.
       penalty += (classCount - 2) * 4;
@@ -993,7 +1015,16 @@ export function getSelectorCandidates(element) {
     addCandidate(registry, firstNthCandidate, { duplicateScore: 66, element });
   }
 
-  return sortCandidates(registry.list());
+  const sorted = sortCandidates(registry.list());
+  const hasNonFullUnique = sorted.some((candidate) => {
+    const type = candidate.type || inferSelectorType(candidate.selector);
+    return candidate.unique && type !== 'xpath-full';
+  });
+  if (!hasNonFullUnique) return sorted;
+  return sorted.filter((candidate) => {
+    const type = candidate.type || inferSelectorType(candidate.selector);
+    return type !== 'xpath-full';
+  });
 }
 
 /**
@@ -1121,4 +1152,3 @@ export function collectSelectorInfos(eventRecord) {
 
   return infos;
 }
-
