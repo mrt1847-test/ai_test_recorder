@@ -65,5 +65,3 @@ npm install
 - 이벤트 스키마, 모듈화 전략 등 세부 설계는 `docs/content-modularization.md`를 참고하세요.
 - Playwright/Selenium 코드 커스터마이징, AI 연동 등은 `background.js` 또는 별도 백엔드와 연계해 확장할 수 있습니다.
 
-## License
-현재 별도의 라이선스 파일이 지정되어 있지 않습니다. 필요에 따라 프로젝트 정책에 맞는 라이선스를 추가하세요.
